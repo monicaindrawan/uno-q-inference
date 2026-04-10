@@ -186,12 +186,60 @@
     }
 
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Peer status bar */
+    .peer-status {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 0.6rem 0.9rem;
+      border-radius: 10px;
+      font-size: 0.82rem;
+      font-weight: 500;
+      margin-bottom: 1.5rem;
+      border: 1px solid transparent;
+      transition: background 0.3s, border-color 0.3s;
+    }
+
+    .peer-status.connected {
+      background: #f0fdf4;
+      border-color: #86efac;
+      color: #166534;
+    }
+
+    .peer-status.disconnected {
+      background: #fef2f2;
+      border-color: #fca5a5;
+      color: #991b1b;
+    }
+
+    .peer-status .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .peer-status.connected .dot { background: #22c55e; }
+    .peer-status.disconnected .dot { background: #ef4444; }
+
+    .peer-status .counter {
+      margin-left: auto;
+      font-size: 0.78rem;
+      opacity: 0.75;
+    }
   </style>
 </head>
 <body>
   <div class="card">
     <h1>GTSRB Classifier</h1>
     <p class="subtitle">Upload an image to get a predicted class.</p>
+
+    <div class="peer-status disconnected" id="peer-status">
+      <span class="dot"></span>
+      <span id="peer-status-text">Bluetooth: connecting…</span>
+      <span class="counter" id="peer-counter" style="display:none">0 messages exchanged</span>
+    </div>
 
     <div class="drop-zone" id="drop-zone">
       <input type="file" id="file-input" accept=".ppm" />
@@ -312,6 +360,36 @@
         classifyBtn.textContent = 'Classify';
       }
     });
+    // --- Peer status polling ---
+    const peerStatusEl  = document.getElementById('peer-status');
+    const peerStatusText = document.getElementById('peer-status-text');
+    const peerCounter   = document.getElementById('peer-counter');
+
+    async function refreshPeerStatus() {
+      try {
+        const resp = await fetch('/peer-status');
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        if (data.connected) {
+          peerStatusEl.className = 'peer-status connected';
+          peerStatusText.textContent = `Bluetooth: connected${data.peer_mac ? ' to ' + data.peer_mac : ''}`;
+          peerCounter.style.display = 'inline';
+          peerCounter.textContent = `${data.messages_exchanged} msg exchanged (↑${data.messages_sent} ↓${data.messages_received})`;
+        } else {
+          peerStatusEl.className = 'peer-status disconnected';
+          peerStatusText.textContent = data.peer_mac
+            ? `Bluetooth: connecting to ${data.peer_mac}…`
+            : 'Bluetooth: no peer configured';
+          peerCounter.style.display = 'none';
+        }
+      } catch (_) {
+        // server unreachable — leave status as-is
+      }
+    }
+
+    refreshPeerStatus();
+    setInterval(refreshPeerStatus, 2000);
   </script>
 </body>
 </html>
