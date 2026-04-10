@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GTSRB Classifier</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f0f2f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+      padding: 2.5rem;
+      width: 100%;
+      max-width: 480px;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+      color: #111;
+    }
+
+    .subtitle {
+      font-size: 0.9rem;
+      color: #666;
+      margin-bottom: 1.75rem;
+    }
+
+    /* Drop zone */
+    .drop-zone {
+      border: 2px dashed #c0c7d0;
+      border-radius: 12px;
+      padding: 2rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      position: relative;
+    }
+
+    .drop-zone:hover, .drop-zone.drag-over {
+      border-color: #4f6ef7;
+      background: #f5f7ff;
+    }
+
+    .drop-zone input[type="file"] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      width: 100%;
+      height: 100%;
+    }
+
+    .drop-zone .icon {
+      font-size: 2.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .drop-zone p {
+      font-size: 0.9rem;
+      color: #555;
+    }
+
+    .drop-zone .hint {
+      font-size: 0.78rem;
+      color: #999;
+      margin-top: 0.25rem;
+    }
+
+    /* File info card (shown instead of image preview for non-web formats like PPM) */
+    #preview-wrap {
+      display: none;
+      margin-top: 1.25rem;
+    }
+
+#file-info {
+      display: none;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.85rem 1rem;
+      background: #f8f9fb;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+    }
+
+    #file-info .file-icon { font-size: 1.75rem; flex-shrink: 0; }
+
+    #file-info .file-details { min-width: 0; }
+
+    #file-info .file-name {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #222;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #file-info .file-size {
+      font-size: 0.78rem;
+      color: #888;
+      margin-top: 0.1rem;
+    }
+
+    /* Button */
+    button {
+      display: block;
+      width: 100%;
+      margin-top: 1.25rem;
+      padding: 0.75rem;
+      background: #4f6ef7;
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    button:hover:not(:disabled) { background: #3a57e8; }
+    button:disabled { background: #a5b4fc; cursor: not-allowed; }
+
+    /* Result */
+    #result {
+      display: none;
+      margin-top: 1.5rem;
+      padding: 1.25rem;
+      border-radius: 12px;
+      background: #f0f4ff;
+      border: 1px solid #c7d4fb;
+      text-align: center;
+    }
+
+    #result .label {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #6a82c8;
+      font-weight: 600;
+    }
+
+    #result .class-value {
+      font-size: 3rem;
+      font-weight: 800;
+      color: #2d3a8c;
+      line-height: 1.1;
+      margin-top: 0.25rem;
+    }
+
+    /* Error */
+    #error {
+      display: none;
+      margin-top: 1rem;
+      padding: 0.75rem 1rem;
+      background: #fff0f0;
+      border: 1px solid #fca5a5;
+      border-radius: 10px;
+      color: #b91c1c;
+      font-size: 0.88rem;
+    }
+
+    /* Spinner */
+    .spinner {
+      display: inline-block;
+      width: 18px;
+      height: 18px;
+      border: 3px solid rgba(255,255,255,0.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>GTSRB Classifier</h1>
+    <p class="subtitle">Upload an image to get a predicted class.</p>
+
+    <div class="drop-zone" id="drop-zone">
+      <input type="file" id="file-input" accept=".ppm" />
+      <div class="icon">🖼️</div>
+      <p>Drag &amp; drop an image here</p>
+      <p class="hint">or click to browse</p>
+    </div>
+
+    <div id="preview-wrap">
+      <div id="file-info">
+        <div class="file-icon">🗂️</div>
+        <div class="file-details">
+          <div class="file-name" id="file-name"></div>
+          <div class="file-size" id="file-size"></div>
+        </div>
+      </div>
+    </div>
+
+    <button id="classify-btn" disabled>Classify</button>
+
+    <div id="result">
+      <div class="label">Predicted Class</div>
+      <div class="class-value" id="class-output">—</div>
+    </div>
+
+    <div id="error"></div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('file-input');
+    const dropZone = document.getElementById('drop-zone');
+    const previewWrap = document.getElementById('preview-wrap');
+    const fileInfo = document.getElementById('file-info');
+    const fileNameEl = document.getElementById('file-name');
+    const fileSizeEl = document.getElementById('file-size');
+    const classifyBtn = document.getElementById('classify-btn');
+    const resultEl = document.getElementById('result');
+    const classOutput = document.getElementById('class-output');
+    const errorEl = document.getElementById('error');
+
+    const ALLOWED_EXTENSIONS = new Set(['.ppm']);
+
+    let selectedFile = null;
+
+    function formatBytes(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function getExt(name) {
+      const m = name.match(/(\.[^.]+)$/);
+      return m ? m[1].toLowerCase() : '';
+    }
+
+    function showFile(file) {
+      selectedFile = file;
+      previewWrap.style.display = 'block';
+
+      fileInfo.style.display = 'flex';
+      fileNameEl.textContent = file.name;
+      fileSizeEl.textContent = formatBytes(file.size);
+
+      classifyBtn.disabled = false;
+      resultEl.style.display = 'none';
+      errorEl.style.display = 'none';
+    }
+
+    function isAllowed(file) {
+      return ALLOWED_EXTENSIONS.has(getExt(file.name));
+    }
+
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files[0]) showFile(fileInput.files[0]);
+    });
+
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('drag-over');
+    });
+
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      if (file && isAllowed(file)) showFile(file);
+    });
+
+    classifyBtn.addEventListener('click', async () => {
+      if (!selectedFile) return;
+
+      classifyBtn.disabled = true;
+      classifyBtn.innerHTML = '<span class="spinner"></span>Classifying…';
+      resultEl.style.display = 'none';
+      errorEl.style.display = 'none';
+
+      try {
+        const formData = new FormData();
+        formData.append('file', selectedFile);
+
+        const resp = await fetch('/classify', { method: 'POST', body: formData });
+        const data = await resp.json();
+
+        if (data.error) {
+          errorEl.textContent = data.error;
+          errorEl.style.display = 'block';
+        } else {
+          classOutput.textContent = data.predicted_class;
+          resultEl.style.display = 'block';
+        }
+      } catch (err) {
+        errorEl.textContent = 'Request failed. Is the server running?';
+        errorEl.style.display = 'block';
+      } finally {
+        classifyBtn.disabled = false;
+        classifyBtn.textContent = 'Classify';
+      }
+    });
+  </script>
+</body>
+</html>
