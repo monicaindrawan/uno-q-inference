@@ -11,7 +11,7 @@ RECONNECT_DELAY = 3
 
 
 class PeerNode:
-    def _init_(self, my_name: str, peer_mac: str, channel: int):
+    def __init__(self, my_name: str, peer_mac: str, channel: int):
         self.my_name = my_name
         self.peer_mac = peer_mac
         self.channel = channel
