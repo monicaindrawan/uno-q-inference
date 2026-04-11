@@ -1,0 +1,12 @@
+{
+  "peers": [
+    {
+      "name": "UNO",
+      "mac": "14:B5:CD:E8:9E:DF"
+    },
+    {
+      "name": "Heartstart",
+      "mac": "14:B5:CD:E8:7E:D7"
+    }
+  ]
+}
