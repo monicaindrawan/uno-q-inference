@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from bluetooth_peer_node import PeerNode, load_peer_macs
+from solo_inference import solo_inference
 
 peer_node = PeerNode(
     my_name=socket.gethostname(),
@@ -29,9 +30,8 @@ app = FastAPI(title="Image Classifier", lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")
 
 
-def mock_classify(image_bytes: bytes) -> int:
-    """Mock AI model — replace with real inference later."""
-    return random.randint(0, 9)
+def node_classify(image_bytes: bytes) -> int:
+    return solo_inference(image_bytes)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -46,7 +46,7 @@ async def classify(file: UploadFile = File(...)):
         return {"error": f"Unsupported file type '{ext}'. Only .ppm files are accepted."}
 
     image_bytes = await file.read()
-    predicted_class = mock_classify(image_bytes)
+    predicted_class = node_classify(image_bytes)
 
     return {
         "filename": file.filename,
