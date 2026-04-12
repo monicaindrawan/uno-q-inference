@@ -39,7 +39,7 @@ async def classify(file: UploadFile = File(...)):
         return {"error": f"Unsupported file type '{ext}'. Only .ppm files are accepted."}
 
     image_bytes = await file.read()
-    output = solo_classify(image_bytes)
+    output = fusion_classify(image_bytes)
 
     return {
         "filename": file.filename,
