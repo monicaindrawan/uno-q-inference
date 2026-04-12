@@ -166,4 +166,3 @@ def fusion_inference(image_bytes: bytes, timeout: float = 10.0) -> int:
     with torch.no_grad():
         logits, _ = model.fused_forward(own_emb, [peer_emb])
     return logits.argmax(1).item()
-    pass
