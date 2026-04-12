@@ -198,7 +198,7 @@ def collaborative_inference(image_bytes: bytes, timeout: float = 5.0) -> dict:
     if confidence >= CONFIDENCE_THRESHOLD:
         return {
             "pred_class": logits.argmax(1).item(),
-            "method": f"solo_inference (solo confidence: {confidence})"
+            "method": f"solo_inference (solo confidence: {confidence:.2f})"
         }
 
     # Low confidence — request peer embedding and fuse.
@@ -217,14 +217,12 @@ def collaborative_inference(image_bytes: bytes, timeout: float = 5.0) -> dict:
         print("No peer embedding received within timeout")
         return {
             "pred_class": logits.argmax(1).item(),
-            "method": f"solo_inference (solo confidence: {confidence}, note: fallback as peer is not responding)",
-            "confidence": confidence,
+            "method": f"solo_inference (solo confidence: {confidence:.2f}, note: fallback as peer is not responding)"
         }
 
     with torch.no_grad():
         fused_logits, _ = model.fused_forward(own_emb, [peer_emb])
     return {
         "pred_class": fused_logits.argmax(1).item(),
-        "method": f"fusion_inference (solo confidence: {confidence})",
-        "confidence": confidence,
+        "method": f"fusion_inference (solo confidence: {confidence:.2f})"
     }
