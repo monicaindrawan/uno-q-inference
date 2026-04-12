@@ -10,28 +10,12 @@ from fastapi.templating import Jinja2Templates
 
 from peer_node import PeerNode, load_peer_macs
 
-# ---------------------------------------------------------------------------
-# Bluetooth peer configuration — set via environment variables before launch:
-#   PEERS_FILE   path to JSON file listing peers (default: peers.json)
-#   BT_CHANNEL   RFCOMM channel                 (default: 4)
-#   BT_INTERVAL  seconds between messages       (default: 5)
-#   BT_MESSAGE   fixed message to send          (default: PING)
-#
-# peers.json format:
-#   { "peers": [ {"name": "NODE_B", "mac": "AA:BB:CC:DD:EE:FF"}, ... ] }
-# ---------------------------------------------------------------------------
-_PEER_NAME = socket.gethostname()
-_PEERS_FILE = os.getenv("PEERS_FILE", "peers.json")
-_BT_CHANNEL = int(os.getenv("BT_CHANNEL", "4"))
-_BT_INTERVAL = int(os.getenv("BT_INTERVAL", "5"))
-_BT_MESSAGE = os.getenv("BT_MESSAGE", "PING")
-
 peer_node = PeerNode(
-    my_name=_PEER_NAME,
-    peer_macs=load_peer_macs(_PEERS_FILE),
-    channel=_BT_CHANNEL,
-    interval=_BT_INTERVAL,
-    fixed_message=_BT_MESSAGE,
+    my_name=socket.gethostname(),
+    peer_macs=load_peer_macs("peers.json"),
+    channel=4,
+    interval=5,
+    fixed_message="PING",
 )
 
 @asynccontextmanager

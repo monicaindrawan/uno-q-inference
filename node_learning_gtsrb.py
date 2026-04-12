@@ -5,28 +5,37 @@ Node Learning on GTSRB (German Traffic Sign Recognition Benchmark)
 Simulates decentralised learning where 4 camera nodes observe the same traffic
 signs through different degradations:
 
-    1. Grayscale / IR   — monochrome + noise      (IR camera, B&W CCTV)
-    2. Colour Shifted   — bad white balance        (sodium/fluorescent/tungsten)
+    1. Cheap Sensor     — low-res blur + noise   (budget doorbell/IP cam)
+    2. Grayscale / IR   — monochrome + noise      (IR camera, B&W CCTV)
+    3. Colour Shifted   — bad white balance        (sodium/fluorescent/tungsten)
+    4. Normal Camera    — no degradation           (decent vehicle dashcam)
 
 Each node trains its own CNN encoder + classifier independently on its
 distorted view of the GTSRB training set (43 traffic sign classes, ~39K images,
 resized to 48x48).
 
-Collaborative inference by cross-attention & modified-TATE framework. 
+A cross-attention fusion head (transformer-style) is then trained on frozen
+node embeddings. During collaborative inference, when a node's confidence
+(normalised entropy) falls below a threshold, it requests embeddings from
+peers and the fusion head combines them via multi-head self-attention.
+
+Regularisation:
+    - L2-normalised embeddings before attention (prevents magnitude bias)
+    - Entropy penalty on pooling weights (prevents attention collapse)
 
 Metrics reported:
     - Solo accuracy per node and clean baseline
+    - Fusion-always accuracy + average attention weights
     - Collaborative inference: triggered rate, fixed/broke/kept stats
     - Collaboration Efficiency (CE) from the Node Learning paper (Sec 3.5)
 
 """
-import copy 
+
 import os
 import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import pandas as pd
@@ -44,15 +53,7 @@ from distortions_final import (
 # ============================================================================
 # Config
 # ============================================================================
-if torch.cuda.is_available():
-    DEVICE = torch.device("cuda")
-elif torch.backends.mps.is_available():
-    DEVICE = torch.device("mps")
-else:
-    DEVICE = torch.device("cpu")
-
-print(f"System Check: Running on {DEVICE}")
-
+DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 BATCH_SIZE = 64
 EPOCHS = 20
 LR = 1e-3
@@ -60,10 +61,10 @@ EMBEDDING_DIM = 128
 NUM_CLASSES = 43
 CONFIDENCE_THRESHOLD = 0.6
 FUSION_EPOCHS = 20
+ENTROPY_LAMBDA = 0.05        # weight for attention entropy regularization
 MODEL_DIR = "./models"
 DATA_DIR = "./GTSRB_data"
 IMG_SIZE = 48
-NUM_NODES = 2
 
 print(f"Using device: {DEVICE}")
 
@@ -136,8 +137,8 @@ class MultiResolutionDataset(Dataset):
 
     Example:
         node_configs = {
-            "night_cam": {"size": 48, "transform": NodeTransform(night_camera, "pole_fixed", 48)},
-            "cheap_sensor": {"size": 64, "transform": NodeTransform(cheap_sensor, "handheld", 64)},
+            "cheap": {"size": 48, "transform": NodeTransform(cheap_sensor, "handheld", 48)},
+            "ir": {"size": 48, "transform": NodeTransform(grayscale_ir, "pole_fixed", 48)},
         }
         dataset = MultiResolutionDataset(train_csv, DATA_DIR, node_configs)
     """
@@ -215,87 +216,7 @@ class Classifier(nn.Module):
         return self.head(embedding)
 
 
-class FuseEncode(nn.Module):
-    """
-    Information fusion encoder for collaborative inference.
-    Returns a fused embedding (not logits) - the node's classifier is used after.
-    """
-    def __init__(self, embedding_dim=EMBEDDING_DIM, n_heads=4, ff_dim=256, dropout=0.1):
-        super().__init__()
-
-        self.emb_pad = 160 # padding for GPU optimisation 
-        
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.emb_pad,
-            nhead=n_heads,
-            dim_feedforward=ff_dim,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=1)
-
-        self.compress = nn.Linear(in_features=NUM_NODES*self.emb_pad, out_features=embedding_dim)
-        
-
-    def forward(self, embeddings, padding_mask=None):
-        """
-        Args:
-            embeddings (tagged): (batch, N_nodes, embed_dim+1) - sorted, stacked, normed and tagged. 
-            padding_mask: (batch, N_nodes) - True for dropped/unavailable nodes
-
-        Returns:
-            fused: (batch, embed_dim) - fused embedding
-        """
-        embeddings = F.pad(embeddings, (0, self.emb_pad - embeddings.shape[-1]))
-        refined = self.transformer(embeddings, src_key_padding_mask=padding_mask)
-
-        refined = torch.flatten(refined, start_dim=1)
-
-        fused = self.compress(refined)
-
-        return fused
-    
-class FuseDecode(nn.Module):
-    
-    """
-    Decodes the fused embedding back to normalised stacked embeddings. 
-    This is only used for training purpose (forward differential loss).
-
-    """
-    def __init__(self, embedding_dim=EMBEDDING_DIM, n_heads=4, ff_dim=256, dropout=0.1):
-        super().__init__()
-        self.embedding_dim = embedding_dim 
-        self.emb_pad = 160 # padding for GPU optimisation 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.emb_pad,
-            nhead=n_heads,
-            dim_feedforward=ff_dim,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=1)
-
-        self.project = nn.Linear(in_features=embedding_dim, out_features=NUM_NODES*self.emb_pad)
-        
-
-    def forward(self, embedding, padding_mask=None):
-        """
-        Args:
-            embedding: (batch, embed_dim) - fused embeddings by FusedEncode
-
-        Returns:
-            decoded: (batch, N_nodes, embed_dim) - decoded stacked embedding
-            tags: (batch, N_nodes) - recovered availability tag
-        """
-        batch_size = embedding.shape[0]
-        projected = self.project(embedding)
-        shape_recovered = torch.reshape(projected, (batch_size, NUM_NODES, self.emb_pad))
-        decoded = self.transformer(shape_recovered)
-
-        tags = decoded[:,:,self.embedding_dim]
-        decoded = decoded[:,:,:self.embedding_dim]
-
-        return tags, decoded 
+from merge_operators import FusionHead
 
 
 class NodeModel(nn.Module):
@@ -305,13 +226,13 @@ class NodeModel(nn.Module):
     Each node has:
     - encoder: extracts embeddings from images
     - classifier: classifies embeddings (solo mode)
-    - fuse_encode: combines own + peer embeddings (collaborative mode)
+    - fusion_head: combines own + peer embeddings (collaborative mode)
     """
     def __init__(self, include_fusion=True):
         super().__init__()
         self.encoder = Encoder()
         self.classifier = Classifier()
-        self.fuse_encode = FuseEncode() if include_fusion else None
+        self.fusion_head = FusionHead() if include_fusion else None
 
     def forward(self, x):
         """Solo inference - just encode and classify."""
@@ -319,44 +240,95 @@ class NodeModel(nn.Module):
         logits = self.classifier(embedding)
         return logits, embedding
 
-    def fused_forward(self, own_embedding, peer_embeddings, mask):
+    def fused_forward(self, own_embedding, peer_embeddings, padding_mask=None):
         """
         Collaborative inference - fuse own embedding with peers and classify.
 
         Args:
-            own_embedding: tuple (name, embedding) with embedding size = (batch, embed_dim) - this node's embedding
-            peer_embeddings: list of tuples (name, embedding) with size = (batch, embed_dim)
-            mask: (batch, NUM_NODES) - concacenated availablity tag: This is now NOT an optional parameter 
+            own_embedding: (batch, embed_dim) - this node's embedding
+            peer_embeddings: list of (batch, embed_dim) - peer embeddings
+            padding_mask: (batch, N_nodes) - optional mask for dropped peers
 
         Returns:
-            logits: (batch, num_classes) 
-            log_logits: (batch, num_classes), used for forward and backward loss training (symmetric KL-divergence)
+            logits: (batch, num_classes)
+            attn_weights: (batch, N_nodes)
         """
-        if self.fuse_encode is None: 
+        if self.fusion_head is None:
             raise ValueError("This node has no fusion head. Initialize with include_fusion=True")
 
-        # Sort the nodes by alphabetical order 
-        all_embs_labelled = [own_embedding] + list(peer_embeddings)
-        sorted_embs_labelled = sorted(all_embs_labelled, key=lambda x: x[0])
-        embs_only = [item[1] for item in sorted_embs_labelled]
-        
-        # Stack
-        stacked = torch.stack(embs_only, dim=1)  # (batch, N_nodes, embed_dim)
+        # Stack: own embedding first, then peers
+        all_embs = [own_embedding] + list(peer_embeddings)
+        stacked = torch.stack(all_embs, dim=1)  # (batch, N_nodes, embed_dim)
 
-        mask = mask.unsqueeze(-1)
-        stacked_n = nn.functional.normalize(stacked, p=2, dim=-1)
-        stacked_masked_n = stacked_n * mask
-        
-
-        stacked_masked_n_tagged = torch.cat([stacked_masked_n, mask], dim=-1)
-
-        # Create padding mask for transformer (True = ignore)
-        padding_mask = (mask.squeeze(-1) == 0)
-
-        fused = self.fuse_encode(stacked_masked_n_tagged, padding_mask)
+        fused, attn_weights = self.fusion_head(stacked, padding_mask)
         logits = self.classifier(fused)
 
-        return logits 
+        return logits, attn_weights
+
+
+# ============================================================================
+# Cross-Attention Fusion (Transformer-style) - LEGACY, kept for compatibility
+# ============================================================================
+class CrossAttentionFusion(nn.Module):
+    """
+    Transformer-style cross-attention fusion for node embeddings.
+
+    Each node's embedding attends to all other nodes via Q/K/V, allowing
+    pairwise interaction before fusion. This captures relationships like
+    "night_cam has shape info that motion_blur lacks" — not just individual
+    importance scores.
+
+    Architecture:
+        1. L2-normalize embeddings (remove magnitude bias)
+        2. One transformer encoder layer (multi-head self-attention + FFN)
+        3. Mean-pool the refined tokens → single fused embedding
+        4. Classify
+
+    Returns logits and per-node attention weights for interpretability.
+    """
+    def __init__(self, embedding_dim=EMBEDDING_DIM, num_classes=NUM_CLASSES,
+                 n_heads=4, ff_dim=256, dropout=0.1):
+        super().__init__()
+        # transformer encoder layer: self-attention + feed-forward
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embedding_dim,
+            nhead=n_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=1)
+
+        # post-attention scoring for interpretability + entropy regularization
+        self.attn_score = nn.Sequential(
+            nn.Linear(embedding_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 1),
+        )
+
+        # classifier on the fused embedding
+        self.classifier = nn.Sequential(
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(embedding_dim, num_classes),
+        )
+
+    def forward(self, embeddings):
+        # embeddings: (batch, N_nodes, embed_dim)
+        # L2-normalize to remove magnitude bias between encoders
+        normed = nn.functional.normalize(embeddings, p=2, dim=-1)
+
+        # cross-attention: each node attends to all others
+        refined = self.transformer(normed)              # (batch, N, embed_dim)
+
+        # compute interpretable attention weights for pooling
+        scores = self.attn_score(refined)               # (batch, N, 1)
+        weights = torch.softmax(scores, dim=1)          # (batch, N, 1)
+
+        # weighted pool → fused embedding
+        fused = (weights * refined).sum(dim=1)          # (batch, embed_dim)
+        logits = self.classifier(fused)                 # (batch, num_classes)
+        return logits, weights.squeeze(-1)              # logits, (batch, N)
 
 
 # ============================================================================
@@ -374,7 +346,7 @@ confidence_fn = confidence_entropy
 
 
 # ============================================================================
-# Training - Individual Node Inference Network 
+# Training
 # ============================================================================
 def train_node(node_model, train_loader, node_name):
     node_model.to(DEVICE)
@@ -408,180 +380,244 @@ def train_node(node_model, train_loader, node_name):
 
 
 # ============================================================================
-# Training — Collaborative Inference Network (FuseEncode)
+# Training — cross-attention fusion head
 # ============================================================================
-
-def train_fusion(nodes, multi_res_loader, node_names, p_drop=0.0, nodes_full=None, train_lambda=False):
+def train_fusion(fusion_model, nodes, multi_res_loader, node_names):
     """
-    Train the cross-attention TATE fusion head with optional node dropout.
+    Train the cross-attention fusion head on stacked embeddings from all nodes.
+    Node encoders are frozen — only the fusion module learns.
+
+    Args:
+        fusion_model: CrossAttentionFusion model
+        nodes: Dict of trained NodeModel instances
+        multi_res_loader: DataLoader returning (images_dict, labels) from MultiResolutionDataset
+        node_names: List of node names (determines stacking order)
+    """
+    fusion_model.to(DEVICE)
+    for node in nodes.values():
+        node.eval()
+
+    optimizer = optim.Adam(fusion_model.parameters(), lr=LR)
+    criterion = nn.CrossEntropyLoss()
+
+    epoch_bar = tqdm(range(FUSION_EPOCHS), desc="  fusion", unit="ep")
+    for epoch in epoch_bar:
+        fusion_model.train()
+        total_loss, correct, total = 0, 0, 0
+
+        for images_dict, labels in multi_res_loader:
+            labels = labels.to(DEVICE)
+
+            # Extract embeddings from each node's encoder at its native resolution
+            emb_list = []
+            for name in node_names:
+                images = images_dict[name].to(DEVICE)
+                with torch.no_grad():
+                    emb = nodes[name].encoder(images)
+                emb_list.append(emb)
+
+            stacked = torch.stack(emb_list, dim=1)  # (batch, N_nodes, embed_dim)
+
+            logits, attn_weights = fusion_model(stacked)
+            ce_loss = criterion(logits, labels)
+
+            # entropy regularization: penalize peaked attention
+            attn_entropy = -(attn_weights * torch.log(attn_weights + 1e-8)).sum(dim=-1).mean()
+            loss = ce_loss - ENTROPY_LAMBDA * attn_entropy
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item() * labels.size(0)
+            correct += (logits.argmax(1) == labels).sum().item()
+            total += labels.size(0)
+
+        acc = correct / total * 100
+        avg_loss = total_loss / total
+        epoch_bar.set_postfix(loss=f"{avg_loss:.4f}", acc=f"{acc:.1f}%")
+
+    print(f"  [fusion] Final — Loss: {avg_loss:.4f}  Acc: {acc:.1f}%")
+    return fusion_model
+
+
+def train_fusion_with_dropout(fusion_model, nodes, multi_res_loader, node_names, p_drop=0.0):
+    """
+    Train the cross-attention fusion head with optional node dropout.
 
     During training, randomly zeros out node embeddings with probability p_drop.
     This teaches the fusion head to handle missing peers gracefully.
 
     Args:
-        nodes: Dict of trained NodeModel instances (nodes[name] = NodeModel (at least have trained solo encoder + classifier)) 
-        nodes_full : Dict of trained NodeModel instances (nodes[name] = NodeModel (at least have trained solo encoder + classifier + fusion model trained with full modality)
+        fusion_model: CrossAttentionFusion model
+        nodes: Dict of trained NodeModel instances
         multi_res_loader: DataLoader returning (images_dict, labels)
         node_names: List of node names
         p_drop: Probability of dropping each node per sample (0.0 = no dropout)
     """
-    # Freeze encoders, onlly train fusion heads 
+    fusion_model.to(DEVICE)
+    for node in nodes.values():
+        node.eval()
+
+    optimizer = optim.Adam(fusion_model.parameters(), lr=LR)
+    criterion = nn.CrossEntropyLoss()
+    n_nodes = len(node_names)
+
+    epoch_bar = tqdm(range(FUSION_EPOCHS), desc="  fusion+dropout", unit="ep")
+    for epoch in epoch_bar:
+        fusion_model.train()
+        total_loss, correct, total = 0, 0, 0
+
+        for images_dict, labels in multi_res_loader:
+            batch_size = labels.size(0)
+            labels = labels.to(DEVICE)
+
+            # Extract embeddings from each node's encoder
+            emb_list = []
+            for name in node_names:
+                images = images_dict[name].to(DEVICE)
+                with torch.no_grad():
+                    emb = nodes[name].encoder(images)
+                emb_list.append(emb)
+
+            stacked = torch.stack(emb_list, dim=1)  # (batch, N, embed_dim)
+
+            # Apply node dropout during training
+            if p_drop > 0 and fusion_model.training:
+                # Random mask: 1 = keep, 0 = drop
+                mask = (torch.rand(batch_size, n_nodes, device=DEVICE) > p_drop).float()
+
+                # Ensure at least 2 nodes are kept per sample
+                keep_counts = mask.sum(dim=1)
+                for i in range(batch_size):
+                    if keep_counts[i] < 2:
+                        keep_indices = torch.randperm(n_nodes, device=DEVICE)[:2]
+                        mask[i] = 0
+                        mask[i, keep_indices] = 1
+
+                # Apply mask: zero out dropped embeddings
+                mask = mask.unsqueeze(-1)  # (batch, N, 1)
+                stacked = stacked * mask
+
+                # Create padding mask for transformer (True = ignore)
+                padding_mask = (mask.squeeze(-1) == 0)
+            else:
+                padding_mask = None
+
+            # Forward through fusion with optional mask
+            normed = nn.functional.normalize(stacked, p=2, dim=-1)
+            refined = fusion_model.transformer(normed, src_key_padding_mask=padding_mask)
+            scores = fusion_model.attn_score(refined)
+
+            # Mask attention scores before softmax
+            if padding_mask is not None:
+                scores = scores.masked_fill(padding_mask.unsqueeze(-1), float('-inf'))
+
+            weights = torch.softmax(scores, dim=1)
+            fused = (weights * refined).sum(dim=1)
+            logits = fusion_model.classifier(fused)
+
+            ce_loss = criterion(logits, labels)
+            attn_entropy = -(weights.squeeze(-1) * torch.log(weights.squeeze(-1) + 1e-8)).sum(dim=-1).mean()
+            loss = ce_loss - ENTROPY_LAMBDA * attn_entropy
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item() * batch_size
+            correct += (logits.argmax(1) == labels).sum().item()
+            total += batch_size
+
+        acc = correct / total * 100
+        avg_loss = total_loss / total
+        epoch_bar.set_postfix(loss=f"{avg_loss:.4f}", acc=f"{acc:.1f}%", p_drop=f"{p_drop:.1f}")
+
+    print(f"  [fusion+dropout] Final — Loss: {avg_loss:.4f}  Acc: {acc:.1f}%  (p_drop={p_drop})")
+    return fusion_model
+
+
+def train_node_fusion_heads(nodes, multi_res_loader, node_names, p_drop=0.0):
+    """
+    Train each node's fusion head from its own perspective.
+
+    Each node learns to combine its own embedding with peer embeddings.
+    The node's own embedding is always first in the stack.
+
+    Args:
+        nodes: Dict of NodeModel instances (must have fusion_head)
+        multi_res_loader: DataLoader returning (images_dict, labels)
+        node_names: List of node names
+        p_drop: Probability of dropping each peer per sample
+    """
+    # Freeze encoders, only train fusion heads
     for node in nodes.values():
         node.encoder.eval()
         for param in node.encoder.parameters():
             param.requires_grad = False
 
+    criterion = nn.CrossEntropyLoss()
+    n_nodes = len(node_names)
+
     for requesting_name in node_names:
         print(f"\n  Training fusion head for: {requesting_name}")
         requesting_node = nodes[requesting_name]
+        requesting_node.fusion_head.train()
 
-        fusion_model = requesting_node.fuse_encode # student encoder model 
+        # Only optimize this node's fusion head (classifier stays frozen)
+        optimizer = optim.Adam(requesting_node.fusion_head.parameters(), lr=LR)
 
-        # decoder is not included in NodeModel as it is not requied for inference
-        # hence a new instance is generated for every training session. 
-        decoder = FuseDecode() 
+        peer_names = [n for n in node_names if n != requesting_name]
 
-        fusion_model.to(DEVICE)
-        decoder.to(DEVICE)
-
-        criterion = nn.CrossEntropyLoss()
-        n_nodes = len(node_names)
-        
-        if p_drop != 0.0:
-            try: #get pre-trained encoder (teacher model)
-                encoder_full = nodes_full[requesting_name]
-                encoder_full.to(DEVICE)
-                encoder_full.eval()
-            except KeyError:
-                print("Pre-trained Encoder not available.")
-
-        # Initialise loss weighting parameters
-        if train_lambda:
-            lamb_1 = nn.Parameter(torch.zeros(1, device=DEVICE))
-            lamb_2 = nn.Parameter(torch.zeros(1, device=DEVICE))
-            lamb_3 = nn.Parameter(torch.zeros(1, device=DEVICE))
-            lambdas = [lamb_1, lamb_2, lamb_3]
-            full_parameters = (list(fusion_model.parameters()) + list(decoder.parameters()) + lambdas)
-        else: # weights of 0.1 follows the original TATE author's implementation
-            lamb_1 = 0.1
-            lamb_2 = 0.1
-            lamb_3 = 0.1
-            full_parameters = (list(fusion_model.parameters()) + list(decoder.parameters()))
-
-        optimizer = optim.Adam(full_parameters, lr=LR)
-
-        epoch_bar = tqdm(range(FUSION_EPOCHS), desc="  fusion+dropout", unit="ep")
+        epoch_bar = tqdm(range(FUSION_EPOCHS), desc=f"    {requesting_name}", unit="ep")
         for epoch in epoch_bar:
-            fusion_model.train()
-            decoder.train()
             total_loss, correct, total = 0, 0, 0
 
             for images_dict, labels in multi_res_loader:
                 batch_size = labels.size(0)
                 labels = labels.to(DEVICE)
 
-                # Extract embeddings from each node's encoder
-                emb_list = []
-                node_names_sorted = sorted(node_names)
-                for name in node_names_sorted:
-                    images = images_dict[name].to(DEVICE)
+                # Get requesting node's embedding
+                with torch.no_grad():
+                    own_images = images_dict[requesting_name].to(DEVICE)
+                    own_emb = requesting_node.encoder(own_images)
+
+                # Get peer embeddings
+                peer_embs = []
+                for peer_name in peer_names:
                     with torch.no_grad():
-                        emb = nodes[name].encoder(images)
-                    emb_list.append((name, emb))
-                
-                if p_drop != 0.0:
-                    emb_only = [e for _, e in emb_list]
-                    stacked_full = torch.stack(emb_only, dim=1) # Full node information copy for training purpose. 
+                        peer_images = images_dict[peer_name].to(DEVICE)
+                        peer_emb = nodes[peer_name].encoder(peer_images)
+                    peer_embs.append(peer_emb)
 
-                emb_only = [e for _, e in emb_list]
-                stacked = torch.stack(emb_only, dim=1)  # (batch, N, embed_dim)
-                 
-
-                mask = torch.ones(batch_size, n_nodes, 1, device=DEVICE).float()
-
-                # Apply node dropout during training
-                if p_drop > 0 and fusion_model.training:
-                    # Random mask: 1 = keep, 0 = drop
-                    mask = (torch.rand(batch_size, n_nodes, device=DEVICE) > p_drop).float()
-
-                    # Ensure at least 2 nodes are kept per sample
-                    keep_counts = mask.sum(dim=1)
+                # Apply peer dropout (own embedding is never dropped)
+                if p_drop > 0:
+                    # Mask: True = dropped
+                    peer_mask = torch.rand(batch_size, len(peer_names), device=DEVICE) < p_drop
+                    # Ensure at least 1 peer is available
+                    all_dropped = peer_mask.all(dim=1)
                     for i in range(batch_size):
-                        if keep_counts[i] < 2:
-                            keep_indices = torch.randperm(n_nodes, device=DEVICE)[:2]
-                            mask[i] = 0
-                            mask[i, keep_indices] = 1
+                        if all_dropped[i]:
+                            keep_idx = torch.randint(len(peer_names), (1,)).item()
+                            peer_mask[i, keep_idx] = False
 
-                    # Apply mask: zero out dropped embeddings
-                    mask = mask.unsqueeze(-1)  # (batch, N, 1)
-                    
-
-                    # Create padding mask for transformer (True = ignore)
-                    padding_mask = (mask.squeeze(-1) == 0)
+                    # Full mask includes own embedding (never dropped)
+                    padding_mask = torch.cat([
+                        torch.zeros(batch_size, 1, device=DEVICE, dtype=torch.bool),
+                        peer_mask
+                    ], dim=1)
                 else:
                     padding_mask = None
 
-                stacked_n = nn.functional.normalize(stacked, p=2, dim=-1)
-                stacked_masked_n = stacked_n * mask
+                # Forward through this node's fusion head
+                logits, attn_weights = requesting_node.fused_forward(
+                    own_emb, peer_embs, padding_mask
+                )
 
-                
-                stacked_masked_n_tagged = torch.cat([stacked_masked_n, mask], dim=-1)
-
-                # Forward through FusionEncode
-                fused = fusion_model(stacked_masked_n_tagged, padding_mask)
-                logits = requesting_node.classifier(fused)
-
-                clf_error = criterion(logits, labels)
-
-                # Forward Differential Loss if training incomplete modality model. 
-                if p_drop == 0.0:
-                    fwd_loss = torch.tensor(0.0, device=DEVICE)
-                else:
-                    stacked_full = torch.stack(emb_only, dim=1) 
-                    # Attach availability tag to stacked embedding with full node info. 
-                    mask_full = torch.ones_like(mask)
-                    stacked_full_n = nn.functional.normalize(stacked_full, p=2, dim=-1)
-                    stacked_full_n_tagged = torch.cat([stacked_full_n, mask_full], dim=-1)
-
-                    # Passing embedding with all node information through "pre-trained encoder"
-                    with torch.no_grad():
-                        embed_full = nodes_full[requesting_name].fuse_encode(stacked_full_n_tagged, padding_mask=None)
-
-                    # Forward Differential Loss (symmetric KL-divergence)
-                    p_embed_full = F.softmax(embed_full, dim=-1)
-                    p_fused = F.softmax(fused, dim=-1)
-
-                    log_p_embed_full = F.log_softmax(embed_full, dim=-1)
-                    log_p_fused = F.log_softmax(fused, dim=-1)
-                    
-                    kl1_f = F.kl_div(log_p_embed_full, p_fused, reduction='batchmean')
-                    kl2_f = F.kl_div(log_p_fused, p_embed_full, reduction='batchmean') 
-
-                    fwd_loss = kl1_f + kl2_f 
-                
-                # Backward Reconstruction Loss (symmetric KL-divergence).
-                tags, decoded = decoder.forward(fused) # decoded = (batch, num_nodes, embed_dim)
-
-                p_decoded = F.softmax(decoded, dim=-1)
-                p_original = F.softmax(stacked_masked_n, dim=-1)
-
-                log_p_decoded = F.log_softmax(decoded, dim=-1)
-                log_p_original = F.log_softmax(stacked_masked_n, dim=-1)
-
-                kl1_b = F.kl_div(log_p_decoded, p_original, reduction='batchmean')
-                kl2_b = F.kl_div(log_p_original, p_decoded, reduction='batchmean') 
-            
-                bwd_loss = kl1_b + kl2_b
-
-                # Tag Reconstruction Loss (MSE/ L1 loss)
-                tags = torch.sigmoid(tags) # (batch, num_nodes)
-                tag_loss = torch.nn.functional.l1_loss(mask.squeeze(-1), tags)
-
-                # Sum up loss contributions.
-                if train_lambda:
-                    loss = clf_error + torch.exp(lamb_1)*fwd_loss + torch.exp(lamb_2)*bwd_loss + torch.exp(lamb_3)*tag_loss
-                else: 
-                    loss = clf_error + lamb_1*fwd_loss + lamb_2*bwd_loss + lamb_3*tag_loss
+                # Loss with entropy regularization
+                ce_loss = criterion(logits, labels)
+                attn_entropy = -(attn_weights * torch.log(attn_weights + 1e-8)).sum(dim=-1).mean()
+                loss = ce_loss - ENTROPY_LAMBDA * attn_entropy
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -593,17 +629,130 @@ def train_fusion(nodes, multi_res_loader, node_names, p_drop=0.0, nodes_full=Non
 
             acc = correct / total * 100
             avg_loss = total_loss / total
-            epoch_bar.set_postfix(loss=f"{avg_loss:.4f}", acc=f"{acc:.1f}%", p_drop=f"{p_drop:.1f}")
+            epoch_bar.set_postfix(loss=f"{avg_loss:.4f}", acc=f"{acc:.1f}%")
 
-            print(f"  [fusion+dropout] Final — Loss: {avg_loss:.4f}  Acc: {acc:.1f}%  (p_drop={p_drop})")
-    
+        print(f"    [{requesting_name}] Fusion Final — Loss: {avg_loss:.4f}  Acc: {acc:.1f}%")
+
+    # Unfreeze encoders for future use
+    for node in nodes.values():
+        for param in node.encoder.parameters():
+            param.requires_grad = True
+
     return nodes
-
 
 
 # ============================================================================
 # Collaborative Inference — cross-attention fusion
 # ============================================================================
+@torch.no_grad()
+def collaborative_inference(nodes, multi_res_loader):
+    """
+    Collaborative inference using each node's own fusion head.
+
+    Args:
+        nodes: Dict of NodeModel instances (with fusion_head)
+        multi_res_loader: DataLoader returning (images_dict, labels)
+    """
+    for node in nodes.values():
+        node.eval()
+
+    node_names = list(nodes.keys())
+
+    all_embeddings = {name: [] for name in nodes}
+    all_logits = {name: [] for name in nodes}
+    all_labels = []
+
+    for images_dict, labels in multi_res_loader:
+        for name in node_names:
+            images = images_dict[name].to(DEVICE)
+            logits, embeddings = nodes[name](images)
+            all_embeddings[name].append(embeddings.cpu())
+            all_logits[name].append(logits.cpu())
+        all_labels.append(labels)
+
+    for name in nodes:
+        all_embeddings[name] = torch.cat(all_embeddings[name])
+        all_logits[name] = torch.cat(all_logits[name])
+    all_labels = torch.cat(all_labels)
+
+    n_samples = len(all_labels)
+
+    stats = {name: {
+        "solo_correct": 0,
+        "collab_correct": 0,
+        "collab_triggered": 0,
+        "collab_solo_was_wrong": 0,
+        "collab_solo_was_right": 0,
+        "collab_fixed": 0,
+        "collab_broke": 0,
+        "collab_stayed_wrong": 0,
+        "collab_stayed_right": 0,
+        "no_collab_correct": 0,
+        "no_collab_wrong": 0,
+        "confidences_when_triggered": [],
+        "confidences_when_not_triggered": [],
+        "attn_weights_when_triggered": [],
+    } for name in nodes}
+
+    for i in range(n_samples):
+        label = all_labels[i].item()
+
+        confidences = {}
+        for name in node_names:
+            conf = confidence_fn(all_logits[name][i].unsqueeze(0)).item()
+            confidences[name] = conf
+
+        for name in node_names:
+            s = stats[name]
+            solo_pred = all_logits[name][i].argmax().item()
+            solo_is_correct = (solo_pred == label)
+
+            if solo_is_correct:
+                s["solo_correct"] += 1
+
+            if confidences[name] >= CONFIDENCE_THRESHOLD:
+                pred = solo_pred
+                s["confidences_when_not_triggered"].append(confidences[name])
+                if pred == label:
+                    s["no_collab_correct"] += 1
+                else:
+                    s["no_collab_wrong"] += 1
+            else:
+                s["collab_triggered"] += 1
+                s["confidences_when_triggered"].append(confidences[name])
+
+                # Use THIS node's fusion head to combine with peers
+                own_emb = all_embeddings[name][i].unsqueeze(0).to(DEVICE)
+                peer_embs = [all_embeddings[p][i].unsqueeze(0).to(DEVICE)
+                            for p in node_names if p != name]
+
+                fused_logits, attn_weights = nodes[name].fused_forward(own_emb, peer_embs)
+                fused_pred = fused_logits.argmax(1).item()
+                attn_w = attn_weights.squeeze(0).cpu().tolist()
+                s["attn_weights_when_triggered"].append(attn_w)
+
+                pred = fused_pred
+                collab_is_correct = (pred == label)
+
+                if solo_is_correct:
+                    s["collab_solo_was_right"] += 1
+                    if collab_is_correct:
+                        s["collab_stayed_right"] += 1
+                    else:
+                        s["collab_broke"] += 1
+                else:
+                    s["collab_solo_was_wrong"] += 1
+                    if collab_is_correct:
+                        s["collab_fixed"] += 1
+                    else:
+                        s["collab_stayed_wrong"] += 1
+
+            if pred == label:
+                s["collab_correct"] += 1
+
+    return stats, n_samples
+
+
 @torch.no_grad()
 def collaborative_inference_with_dropout(
     nodes,
@@ -611,6 +760,7 @@ def collaborative_inference_with_dropout(
     merge_operator=None,
     p_drop=0.0,
     confidence_threshold=CONFIDENCE_THRESHOLD,
+    fusion_model=None,  # Legacy parameter, ignored if nodes have fusion_head
 ):
     """
     Collaborative inference using each node's own fusion head.
@@ -619,11 +769,12 @@ def collaborative_inference_with_dropout(
     This is the decentralized approach where nodes don't share a fusion model.
 
     Args:
-        nodes: Dict of NodeModel instances (with fuse_encode)
+        nodes: Dict of NodeModel instances (with fusion_head)
         multi_res_loader: DataLoader returning (images_dict, labels)
-        merge_operator: Optional MergeOperator (overrides node's fuse_encode)
+        merge_operator: Optional MergeOperator (overrides node's fusion_head)
         p_drop: Probability of each peer being unavailable (0.0 = all available)
         confidence_threshold: Threshold for triggering collaboration
+        fusion_model: Legacy parameter for backwards compatibility
 
     Returns:
         stats: Dict of per-node statistics
@@ -668,8 +819,6 @@ def collaborative_inference_with_dropout(
         "no_collab_wrong": 0,
         "peers_dropped": 0,
         "no_peers_available": 0,
-        "confidences_when_triggered": [],
-        "confidences_when_not_triggered": []
     } for name in nodes}
 
     for i in range(n_samples):
@@ -690,7 +839,6 @@ def collaborative_inference_with_dropout(
                 s["solo_correct"] += 1
 
             if confidences[name] >= confidence_threshold:
-                s['confidences_when_not_triggered'].append(confidences[name])
                 pred = solo_pred
                 if pred == label:
                     s["no_collab_correct"] += 1
@@ -698,16 +846,10 @@ def collaborative_inference_with_dropout(
                     s["no_collab_wrong"] += 1
             else:
                 s["collab_triggered"] += 1
-                s['confidences_when_triggered'].append(confidences[name])
 
                 # Simulate node dropout for peers
                 available_peers = []
                 peer_confs = []
-
-                # Initiation of generation of availability tag
-                availability_dict = {n: 0.0 for n in node_names}
-                availability_dict[name] = 1.0
-
                 for peer_name in node_names:
                     if peer_name == name:
                         continue
@@ -717,10 +859,6 @@ def collaborative_inference_with_dropout(
                         continue
                     available_peers.append(peer_name)
                     peer_confs.append(confidences[peer_name])
-                    availability_dict[peer_name] = 1.0
-
-                node_names_sorted = sorted(node_names)
-                availability_tag = torch.tensor([[availability_dict[n] for n in node_names_sorted]], device = DEVICE, dtype=torch.float32)
 
                 if len(available_peers) == 0:
                     # No peers available, fall back to solo
@@ -730,10 +868,10 @@ def collaborative_inference_with_dropout(
                     # Use requesting node's own fusion head
                     requesting_node = nodes[name]
                     requesting_emb = all_embeddings[name][i].unsqueeze(0).to(DEVICE)
+                    peer_embs = [all_embeddings[p][i].unsqueeze(0).to(DEVICE) for p in available_peers]
 
                     if merge_operator is not None:
                         # Use external merge operator
-                        peer_embs = [all_embeddings[p][i].unsqueeze(0).to(DEVICE) for p in available_peers]
                         peer_contexts = {
                             "confidences": peer_confs,
                             "peer_names": available_peers,
@@ -745,19 +883,8 @@ def collaborative_inference_with_dropout(
                         merged_logits = requesting_node.classifier(merged)
                     else:
                         # Use requesting node's own fusion head
-                        peers = []
-
-                        for p in node_names_sorted:
-                            if p == name:
-                                requester = (p, requesting_emb)
-                            elif p in available_peers:
-                                emb = all_embeddings[p][i].unsqueeze(0).to(DEVICE)
-                                peers.append((p, emb))
-                            elif p not in available_peers:
-                                peers.append((p, torch.zeros_like(requesting_emb)))
-
-                        merged_logits = requesting_node.fused_forward(
-                            requester, peers, availability_tag
+                        merged_logits, _ = requesting_node.fused_forward(
+                            requesting_emb, peer_embs
                         )
 
                     pred = merged_logits.argmax(1).item()
@@ -794,8 +921,10 @@ if __name__ == "__main__":
     # --- Define nodes with full transforms (distortion + geometric augmentation) ---
     # Each node operates at a different resolution to simulate heterogeneous hardware
     NODE_CONFIGS = {
+        "cheap": {"distortion_fn": cheap_sensor, "preset": "handheld", "size": 48},
         "ir": {"distortion_fn": grayscale_ir, "preset": "pole_fixed", "size": 48},
-        "colour_shifted": {"distortion_fn": colour_shifted, "preset": "vehicle_mounted", "size": 48}
+        "colour_shifted": {"distortion_fn": colour_shifted, "preset": "vehicle_mounted", "size": 48},
+        "normal": {"distortion_fn": normal_camera, "preset": "vehicle_mounted", "size": 48},
     }
 
     # --- Random environmental transforms applied on top of camera distortions ---
@@ -837,7 +966,7 @@ if __name__ == "__main__":
     }
     node_names = list(NODE_CONFIGS.keys())
 
-     # --- Create datasets and loaders with NodeTransform ---
+    # --- Create datasets and loaders with NodeTransform ---
     train_loaders = {}
     test_loaders = {}
     for name, config in NODE_CONFIGS.items():
@@ -900,54 +1029,38 @@ if __name__ == "__main__":
     # Each node has its own encoder, classifier, AND fusion head
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    nodes_full = {} # {node_name: NodeModel instant (trained with full modality)}
-    nodes = {} # {node_name: NodeModel instant (the most developed version)}
-    any_needs_fusion_training_drop = False
-    any_needs_fusion_training_full = False
+    nodes = {}
+    any_needs_fusion_training = False
 
     for name in NODE_CONFIGS:
-        model_path_drop = os.path.join(MODEL_DIR, f"gtsrb_{name}_fusion_drop.pt") # "advanced" model trained with random dropout (P(dropout) > 0.8)
-        model_path_full = os.path.join(MODEL_DIR, f"gtsrb_{name}_fusion_full.pt") # model trained with full modality, also act as pre-trained encoder
-        old_model_path = os.path.join(MODEL_DIR, f"gtsrb_{name}.pt") # model with solo encoder + classifier trained only
+        model_path = os.path.join(MODEL_DIR, f"gtsrb_{name}_with_fusion.pt")
+        old_model_path = os.path.join(MODEL_DIR, f"gtsrb_{name}.pt")
 
         model = NodeModel(include_fusion=True)
 
-        if os.path.exists(model_path_drop):
-            print(f"\nLoading saved model (with fusion & trained WITH dropout): {name}")
-            model.load_state_dict(torch.load(model_path_drop, map_location=DEVICE))
+        if os.path.exists(model_path):
+            print(f"\nLoading saved model (with fusion): {name}")
+            model.load_state_dict(torch.load(model_path, map_location=DEVICE))
             model.to(DEVICE)
-            nodes[name] = model
+        elif os.path.exists(old_model_path):
+            # Load old model (encoder + classifier only), fusion head needs training
+            print(f"\nLoading saved model (no fusion): {name}")
+            old_state = torch.load(old_model_path, map_location=DEVICE)
+            # Filter out fusion_head keys that don't exist in old model
+            model_state = model.state_dict()
+            for key in old_state:
+                if key in model_state:
+                    model_state[key] = old_state[key]
+            model.load_state_dict(model_state)
+            model.to(DEVICE)
+            any_needs_fusion_training = True
         else:
-            any_needs_fusion_training_drop = True
-
-            if os.path.exists(old_model_path):
-                # Load old model (encoder + classifier only), fusion head needs training
-                print(f"\nLoading saved model (no fusion): {name}")
-                old_state = torch.load(old_model_path, map_location=DEVICE)
-                # Filter out fuse_encode keys that don't exist in old model
-                model_state = model.state_dict()
-                for key in old_state:
-                    if key in model_state:
-                        model_state[key] = old_state[key]
-                model.load_state_dict(model_state)
-                nodes[name] = model.to(DEVICE)
-            else:
-                print(f"\nTraining node: {name}")
-                model = train_node(model, train_loaders[name], name) # solo inference classifier
-                any_needs_fusion_training_full = True
-                nodes[name] = model
-
-        if os.path.exists(model_path_full):
-            print(f"\nLoading saved model (with fusion & trained WITHOUT dropout): {name}")
-            f_model = NodeModel(include_fusion=True)
-            f_model.load_state_dict(torch.load(model_path_full, map_location=DEVICE))
-            nodes_full[name] = f_model.to(DEVICE)
-        else:
-            any_needs_fusion_training_full = True
-            any_needs_fusion_training_drop = True
-        
-    if any_needs_fusion_training_full:
-        any_needs_fusion_training_drop = True
+            print(f"\nTraining node: {name}")
+            model = train_node(model, train_loaders[name], name)
+            torch.save(model.state_dict(), old_model_path)
+            print(f"  Saved solo model: {old_model_path}")
+            any_needs_fusion_training = True
+        nodes[name] = model
 
     # --- Clean baseline (no distortion, minimal augmentation) ---
     clean_train_transform = NodeTransform(
@@ -974,7 +1087,7 @@ if __name__ == "__main__":
     if os.path.exists(clean_model_path):
         print("\nLoading saved model: clean_baseline")
         saved_state = torch.load(clean_model_path, map_location=DEVICE)
-        # Handle old checkpoints that lack fuse_encode keys
+        # Handle old checkpoints that lack fusion_head keys
         model_state = clean_model.state_dict()
         for key in saved_state:
             if key in model_state:
@@ -993,11 +1106,13 @@ if __name__ == "__main__":
     print("=" * 60)
 
     for name, model in {**nodes, "clean_baseline": clean_model}.items():
+        print(f"\nEvaluating solo performance: {name}")
         model.eval()
         loader = test_loaders.get(name, clean_test_loader)
         correct, total = 0, 0
         with torch.no_grad():
             for images, labels in loader:
+                print(f"  Batch {total//BATCH_SIZE + 1}/{len(loader)}", end="\r")
                 images, labels = images.to(DEVICE), labels.to(DEVICE)
                 logits, _ = model(images)
                 correct += (logits.argmax(1) == labels).sum().item()
@@ -1005,23 +1120,15 @@ if __name__ == "__main__":
         print(f"  {name:15s}  Accuracy: {correct/total*100:.1f}%")
 
     # --- Train each node's fusion head (if needed) ---
-    if any_needs_fusion_training_drop:
-        if any_needs_fusion_training_full:
-            print("\nTraining per-node fusion heads (with full modality):")
-            nodes_copy = {k: copy.deepcopy(v) for k, v in nodes.items()}
-            nodes_full = train_fusion(nodes_copy, multi_res_train_loader, node_names, p_drop=0.0)
-            for name in node_names:
-                model_path = os.path.join(MODEL_DIR, f"gtsrb_{name}_fusion_full.pt")
-                torch.save(nodes_full[name].state_dict(), model_path)
-                print(f"  Saved {name} to {model_path}")
+    if any_needs_fusion_training:
+        print("\nTraining per-node fusion heads:")
+        nodes = train_node_fusion_heads(nodes, multi_res_train_loader, node_names, p_drop=0.1)
 
-        print("\nTraining per-node fusion heads (without full modality):")
-        nodes_drop = train_fusion(nodes, multi_res_train_loader, node_names, p_drop=0.8, nodes_full=nodes_full)
+        # Save updated models with fusion heads
         for name in node_names:
-            model_path = os.path.join(MODEL_DIR, f"gtsrb_{name}_fusion_drop.pt")
+            model_path = os.path.join(MODEL_DIR, f"gtsrb_{name}_with_fusion.pt")
             torch.save(nodes[name].state_dict(), model_path)
             print(f"  Saved {name} to {model_path}")
-
     else:
         print("\nAll fusion heads already trained.")
 
@@ -1033,7 +1140,7 @@ if __name__ == "__main__":
     for node in nodes.values():
         node.eval()
 
-    fusion_stats = {name: {"correct": 0, "total": 0} for name in node_names}
+    fusion_stats = {name: {"correct": 0, "total": 0, "attn_weights": []} for name in node_names}
 
     with torch.no_grad():
         for images_dict, labels in multi_res_test_loader:
@@ -1048,18 +1155,19 @@ if __name__ == "__main__":
 
             # Each node fuses from its perspective
             for name in node_names:
-                own_emb = (name, embeddings[name])
-                peer_embs = [(p, embeddings[p]) for p in node_names if p != name]
-                mask_eval = torch.ones((batch_size, len(node_names)), device=DEVICE)
+                own_emb = embeddings[name]
+                peer_embs = [embeddings[p] for p in node_names if p != name]
 
-                logits = nodes[name].fused_forward(own_emb, peer_embs, mask_eval)
+                logits, weights = nodes[name].fused_forward(own_emb, peer_embs)
                 fusion_stats[name]["correct"] += (logits.argmax(1) == labels).sum().item()
                 fusion_stats[name]["total"] += batch_size
+                fusion_stats[name]["attn_weights"].append(weights.cpu())
 
     print("\n  Per-node fusion accuracy (using own fusion head):")
     for name in node_names:
         acc = fusion_stats[name]["correct"] / fusion_stats[name]["total"] * 100
-        print(f"    {name:15s}  Accuracy: {acc:.1f}% ]")
+        avg_weights = torch.cat(fusion_stats[name]["attn_weights"]).mean(dim=0)
+        print(f"    {name:15s}  Accuracy: {acc:.1f}%  Attention: [self={avg_weights[0]:.3f}, peers={avg_weights[1:].tolist()}]")
 
     # --- Collaborative inference with threshold ---
     print("\n" + "=" * 60)
@@ -1068,7 +1176,7 @@ if __name__ == "__main__":
     print(f"Fusion method: per-node fusion heads (decentralized)")
     print("=" * 60)
 
-    stats, n_samples = collaborative_inference_with_dropout(nodes, multi_res_test_loader, p_drop=0.0)
+    stats, n_samples = collaborative_inference(nodes, multi_res_test_loader)
 
     for name in nodes:
         s = stats[name]
@@ -1099,6 +1207,15 @@ if __name__ == "__main__":
 
             avg_conf_triggered = np.mean(s["confidences_when_triggered"])
             print(f"    Avg confidence when triggered: {avg_conf_triggered:.3f}")
+
+            # average attention weights when this node triggered collab
+            attn_arr = np.array(s["attn_weights_when_triggered"])
+            avg_attn = attn_arr.mean(axis=0)
+            print(f"    Avg attention weights when triggered:")
+            attn_labels = [name] + [p for p in node_names if p != name]
+            for j, lbl in enumerate(attn_labels):
+                tag = " (self)" if j == 0 else ""
+                print(f"      {lbl:15s}  {avg_attn[j]:.3f}{tag}")
 
         no_collab_total = s["no_collab_correct"] + s["no_collab_wrong"]
         if no_collab_total > 0:
