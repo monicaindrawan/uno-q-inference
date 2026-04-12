@@ -1,6 +1,3 @@
-import argparse
-import json
-import sys
 from pathlib import Path
 import shutil
 import torchvision
@@ -10,7 +7,7 @@ import random
 import csv
 import pandas as pd
 
-BASE_URL = os.environ.get("BASE_URL", "http://192.168.1.192:8000")
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
 TEST_CSV = "./GTSRB_data/Test.csv"
 
 
@@ -117,11 +114,46 @@ def classify_image(image_path: Path, method: str = "collaborative") -> dict:
 
 def main():
 
+    test_count = 0
+    solo_correct_count = 0
+    fusion_correct_count = 0
+    collaborative_correct_count = 0
+    collaborative_fusion_trigger_count = 0
+    collaborative_fusion_fixed_count = 0
+    collaborative_fusion_broke_count = 0
+
     for _, row in pd.read_csv(TEST_CSV).iterrows():
         image_path = Path(row["Path"])
         label = row["ClassId"]
 
-        print(classify_image(image_path, "fusion"))
+        solo_output = classify_image(image_path, "solo")
+        fusion_output = classify_image(image_path, "fusion")
+        collaborative_output = classify_image(image_path, "collaborative")
+
+        test_count += 1
+        if solo_output['pred_class'] == label:
+            solo_correct_count += 1
+        if fusion_output['pred_class'] == label:
+            fusion_correct_count += 1
+        if collaborative_output['pred_class'] == label:
+            collaborative_correct_count += 1
+        if collaborative_output['method'] == 'fusion_inference':
+            collaborative_fusion_trigger_count += 1
+
+            if collaborative_output['extra_info']['solo_pred_class'] != label and collaborative_output['pred_class'] == label:
+                collaborative_fusion_fixed_count += 1
+            if collaborative_output['extra_info']['solo_pred_class'] == label and collaborative_output['pred_class'] != label:
+                collaborative_fusion_broke_count += 1
+
+        print(
+            f"[{test_count}] "
+            f"Solo: {solo_correct_count}/{test_count} ({100*solo_correct_count/test_count:.1f}%)  "
+            f"Fusion: {fusion_correct_count}/{test_count} ({100*fusion_correct_count/test_count:.1f}%)  "
+            f"Collaborative: {collaborative_correct_count}/{test_count} ({100*collaborative_correct_count/test_count:.1f}%)  "
+            f"| Fusion triggered: {collaborative_fusion_trigger_count}  "
+            f"Fixed: {collaborative_fusion_fixed_count}  "
+            f"Broke: {collaborative_fusion_broke_count}"
+        )
 
 if __name__ == "__main__":
     download_gtsrb_dataset()
