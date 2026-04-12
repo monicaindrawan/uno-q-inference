@@ -37,7 +37,8 @@ async def classify(file: UploadFile = File(...), method: str = "collaborative"):
         "method": output["method"],
         "pred_class": output["pred_class"],
         "reason": output.get("reason"),
-        "confidence": output.get("confidence")
+        "confidence": output.get("confidence"),
+        "extra_info": output.get("extra_info")
     }
 
 
