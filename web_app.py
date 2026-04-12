@@ -5,7 +5,7 @@ from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from inference import collaborative_inference, fusion_inference, get_peer_status, solo_inference
+from inference import NODE_NAME, collaborative_inference, fusion_inference, get_peer_status, solo_inference
 
 
 app = FastAPI(title="Image Classifier")
@@ -14,7 +14,7 @@ templates = Jinja2Templates(directory="templates")
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse(request, "index.html")
+    return templates.TemplateResponse(request, "index.html", {"node_name": NODE_NAME})
 
 
 @app.post("/classify")

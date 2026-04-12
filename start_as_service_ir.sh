@@ -13,7 +13,7 @@ After=network.target
 [Service]
 User=$USERNAME
 WorkingDirectory=$SCRIPT_DIR
-ExecStart=$SCRIPT_DIR/.venv/bin/fastapi run web_app.py
+ExecStart=NODE_NAME=ir $SCRIPT_DIR/.venv/bin/fastapi run web_app.py
 Restart=on-failure
 RestartSec=5
 
