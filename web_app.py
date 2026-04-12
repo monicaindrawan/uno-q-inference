@@ -8,7 +8,7 @@ from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from peer_node import PeerNode, load_peer_macs
+from bluetooth_peer_node import PeerNode, load_peer_macs
 
 peer_node = PeerNode(
     my_name=socket.gethostname(),

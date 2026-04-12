@@ -83,6 +83,49 @@ class FuseEncode(nn.Module):
         fused = self.compress(refined)
 
         return fused
+    
+    
+class FuseDecode(nn.Module):
+    
+    """
+    Decodes the fused embedding back to normalised stacked embeddings. 
+    This is only used for training purpose (forward differential loss).
+
+    """
+    def __init__(self, embedding_dim=EMBEDDING_DIM, n_heads=4, ff_dim=256, dropout=0.1):
+        super().__init__()
+        self.embedding_dim = embedding_dim 
+        self.emb_pad = 160 # padding for GPU optimisation 
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.emb_pad,
+            nhead=n_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=1)
+
+        self.project = nn.Linear(in_features=embedding_dim, out_features=NUM_NODES*self.emb_pad)
+        
+
+    def forward(self, embedding, padding_mask=None):
+        """
+        Args:
+            embedding: (batch, embed_dim) - fused embeddings by FusedEncode
+
+        Returns:
+            decoded: (batch, N_nodes, embed_dim) - decoded stacked embedding
+            tags: (batch, N_nodes) - recovered availability tag
+        """
+        batch_size = embedding.shape[0]
+        projected = self.project(embedding)
+        shape_recovered = torch.reshape(projected, (batch_size, NUM_NODES, self.emb_pad))
+        decoded = self.transformer(shape_recovered)
+
+        tags = decoded[:,:,self.embedding_dim]
+        decoded = decoded[:,:,:self.embedding_dim]
+
+        return tags, decoded 
 
 
 class NodeModel(nn.Module):
