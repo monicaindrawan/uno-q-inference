@@ -160,6 +160,17 @@
       margin-top: 0.25rem;
     }
 
+    #result .method-row {
+      margin-top: 0.75rem;
+      font-size: 0.82rem;
+      color: #6a82c8;
+    }
+
+    #result .method-row span {
+      font-weight: 600;
+      color: #2d3a8c;
+    }
+
     /* Error */
     #error {
       display: none;
@@ -263,6 +274,7 @@
     <div id="result">
       <div class="label">Predicted Class</div>
       <div class="class-value" id="class-output">—</div>
+      <div class="method-row">Method: <span id="method-output">—</span></div>
     </div>
 
     <div id="error"></div>
@@ -278,6 +290,7 @@
     const classifyBtn = document.getElementById('classify-btn');
     const resultEl = document.getElementById('result');
     const classOutput = document.getElementById('class-output');
+    const methodOutput = document.getElementById('method-output');
     const errorEl = document.getElementById('error');
 
     const ALLOWED_EXTENSIONS = new Set(['.ppm']);
@@ -350,6 +363,7 @@
           errorEl.style.display = 'block';
         } else {
           classOutput.textContent = data.predicted_class;
+          methodOutput.textContent = data.method ?? '—';
           resultEl.style.display = 'block';
         }
       } catch (err) {
@@ -378,9 +392,7 @@
           peerCounter.textContent = `${data.messages_exchanged} msg exchanged (↑${data.messages_sent} ↓${data.messages_received})`;
         } else {
           peerStatusEl.className = 'peer-status disconnected';
-          peerStatusText.textContent = data.peer_mac
-            ? `Bluetooth: connecting to ${data.peer_mac}…`
-            : 'Bluetooth: no peer configured';
+          peerStatusText.textContent = `Peer disconnected... (Only solo inference available)`;
           peerCounter.style.display = 'none';
         }
       } catch (_) {
