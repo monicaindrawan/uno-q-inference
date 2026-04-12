@@ -5,25 +5,11 @@ from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from inference import fusion_inference, get_peer_status, solo_inference
+from inference import collaborative_inference, fusion_inference, get_peer_status, solo_inference
 
 
 app = FastAPI(title="Image Classifier")
 templates = Jinja2Templates(directory="templates")
-
-
-def solo_classify(image_bytes: bytes) -> int: 
-    return {
-        "method": "Solo Inference",
-        "predicted_class": solo_inference(image_bytes)
-    }
-
-
-def fusion_classify(image_bytes: bytes) -> int:
-    return {
-        "method": "Fusion Inference",
-        "predicted_class": fusion_inference(image_bytes)
-    }
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -38,12 +24,12 @@ async def classify(file: UploadFile = File(...)):
         return {"error": f"Unsupported file type '{ext}'. Only .ppm files are accepted."}
 
     image_bytes = await file.read()
-    output = fusion_classify(image_bytes)
+    output = collaborative_inference(image_bytes)
 
     return {
         "filename": file.filename,
         "method": output["method"],
-        "predicted_class": output["predicted_class"],
+        "predicted_class": output["pred_class"],
     }
 
 

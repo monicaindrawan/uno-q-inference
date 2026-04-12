@@ -13,6 +13,7 @@ from node_model import NodeModel
 from bluetooth_peer_node import PeerNode, load_peer_macs
 
 NODE_NAME = os.environ.get("NODE_NAME", "ir")
+CONFIDENCE_THRESHOLD = 0.6
 
 DEVICE = "cpu"
 MODEL_PATHS = {
@@ -141,10 +142,13 @@ def solo_inference(image_bytes: bytes) -> int:
     image_tensor = transform_image(image).to(DEVICE)
     with torch.no_grad():
         logits, _ = model(image_tensor)
-    return logits.argmax(1).item()
+    return {
+        "pred_class": logits.argmax(1).item(),
+        "method": "solo_inference"
+    }
 
 
-def fusion_inference(image_bytes: bytes, timeout: float = 10.0) -> int:
+def fusion_inference(image_bytes: bytes, timeout: float = 5.0) -> int:
     image = bytes_to_resized_image(image_bytes)
     with torch.no_grad():
         image_tensor = transform_image(image)
@@ -161,8 +165,66 @@ def fusion_inference(image_bytes: bytes, timeout: float = 10.0) -> int:
     try:
         peer_emb = _peer_emb_queue.get(timeout=timeout)
     except queue.Empty:
-        raise TimeoutError("No peer embedding received within timeout")
+        print("No peer embedding received within timeout")
+        return {
+            "pred_class": solo_inference(image_bytes)["pred_class"],
+            "method": "solo_inference (fallback as peer is not responding)"
+        }
 
     with torch.no_grad():
         logits, _ = model.fused_forward(own_emb, [peer_emb])
-    return logits.argmax(1).item()
+    return {
+        "pred_class": logits.argmax(1).item(),
+        "method": "fusion_inference"
+    }
+
+
+def confidence_entropy(logits: torch.Tensor) -> float:
+    probs = torch.softmax(logits, dim=-1)
+    log_probs = torch.log(probs + 1e-8)
+    entropy = -(probs * log_probs).sum(dim=-1)
+    max_entropy = np.log(probs.size(-1))
+    return (1.0 - entropy / max_entropy).item()
+
+
+def collaborative_inference(image_bytes: bytes, timeout: float = 5.0) -> dict:
+    image = bytes_to_resized_image(image_bytes)
+    with torch.no_grad():
+        image_tensor = transform_image(image).to(DEVICE)
+        logits, _ = model(image_tensor)
+
+    confidence = confidence_entropy(logits)
+
+    if confidence >= CONFIDENCE_THRESHOLD:
+        return {
+            "pred_class": logits.argmax(1).item(),
+            "method": f"solo_inference (solo confidence: {confidence})"
+        }
+
+    # Low confidence — request peer embedding and fuse.
+    own_emb = image_to_embedding(image_tensor)
+
+    resized_buf = io.BytesIO()
+    image.save(resized_buf, format="PNG")
+    peer_node.send(json.dumps({
+        "type": "req_emb",
+        "data": base64.b64encode(resized_buf.getvalue()).decode(),
+    }))
+
+    try:
+        peer_emb = _peer_emb_queue.get(timeout=timeout)
+    except queue.Empty:
+        print("No peer embedding received within timeout")
+        return {
+            "pred_class": logits.argmax(1).item(),
+            "method": f"solo_inference (solo confidence: {confidence}, note: fallback as peer is not responding)",
+            "confidence": confidence,
+        }
+
+    with torch.no_grad():
+        fused_logits, _ = model.fused_forward(own_emb, [peer_emb])
+    return {
+        "pred_class": fused_logits.argmax(1).item(),
+        "method": f"fusion_inference (solo confidence: {confidence})",
+        "confidence": confidence,
+    }
