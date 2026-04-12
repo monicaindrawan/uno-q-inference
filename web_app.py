@@ -18,13 +18,19 @@ async def index(request: Request):
 
 
 @app.post("/classify")
-async def classify(file: UploadFile = File(...)):
+async def classify(file: UploadFile = File(...), method: str = "collaborative"):
     ext = Path(file.filename).suffix.lower()
     if ext != ".ppm":
         return {"error": f"Unsupported file type '{ext}'. Only .ppm files are accepted."}
 
     image_bytes = await file.read()
-    output = collaborative_inference(image_bytes)
+
+    if method == "fusion":
+        output = fusion_inference(image_bytes)
+    elif method == "solo":
+        output = solo_inference(image_bytes)
+    else:
+        output = collaborative_inference(image_bytes)
 
     return {
         "filename": file.filename,
