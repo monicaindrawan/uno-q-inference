@@ -1,11 +1,16 @@
 import io
+import json
+import base64
+import queue
 import torch
 import numpy as np
 from PIL import Image
 import os
+import socket
 
 from distortions_final import RandomTransformChain, colour_shifted, grayscale_ir, NodeTransform, horizontal_sign_angle, overcast_flat_light, random_occlusion, sign_approaching, stereo_shift, vertical_sign_angle
 from node_model import NodeModel
+from bluetooth_peer_node import PeerNode, load_peer_macs
 
 NODE_NAME = os.environ.get("NODE_NAME", "ir")
 
@@ -55,6 +60,64 @@ transform = NodeTransform(
     random_transforms=random_chain,
 )
 
+# -- Peer node embedding via Bluetooth --------------------------------------
+
+_peer_emb_queue: queue.Queue[torch.Tensor] = queue.Queue(maxsize=1)
+
+
+def _embedding_to_msg(emb: torch.Tensor) -> str:
+    arr = emb.detach().cpu().numpy().astype(np.float32)
+    return json.dumps({
+        "type": "emb",
+        "shape": list(arr.shape),
+        "data": base64.b64encode(arr.tobytes()).decode(),
+    })
+
+
+def _on_peer_message(text: str) -> None:
+    try:
+        obj = json.loads(text)
+        msg_type = obj.get("type")
+
+        if msg_type == "req_emb":
+            # Peer sent us image bytes — compute embedding and send it back.
+            img_bytes = base64.b64decode(obj["data"])
+            with torch.no_grad():
+                emb = bytes_to_embedding(img_bytes)
+            peer_node.send(_embedding_to_msg(emb))
+
+        elif msg_type == "emb":
+            arr = np.frombuffer(base64.b64decode(obj["data"]), dtype=np.float32).copy()
+            emb = torch.from_numpy(arr.reshape(obj["shape"])).to(DEVICE)
+            try:
+                _peer_emb_queue.get_nowait()  # discard any stale value
+            except queue.Empty:
+                pass
+            _peer_emb_queue.put(emb)
+
+    except Exception:
+        pass
+
+peer_node = PeerNode(
+    my_name=socket.gethostname(),
+    peer_macs=load_peer_macs("peers.json"),
+    channel=4,
+    on_message=_on_peer_message,
+)
+peer_node.start()
+
+def get_peer_status():
+    return {
+        "connected": peer_node.is_connected,
+        "active_peer_mac": peer_node.active_peer_mac,
+        "candidate_peer_macs": peer_node.peer_macs,
+        "messages_sent": peer_node.messages_sent,
+        "messages_received": peer_node.messages_received,
+        "messages_exchanged": peer_node.messages_exchanged,
+    }
+
+# ---------------------------------------------------------------------------
+
 
 def bytes_to_transformed_image(image_bytes: bytes):
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB").resize(
@@ -74,6 +137,21 @@ def solo_inference(image_bytes: bytes) -> int:
     return logits.argmax(1).item()
 
 
-def fusion_inference(image_bytes: bytes) -> int:
-    own_emb = bytes_to_embedding(image_bytes)
-    peer_emb = ...
+def fusion_inference(image_bytes: bytes, timeout: float = 2.0) -> int:
+    with torch.no_grad():
+        own_emb = bytes_to_embedding(image_bytes)
+
+    # Send image bytes to peer so they can compute the embedding with their pipeline.
+    peer_node.send(json.dumps({
+        "type": "req_emb",
+        "data": base64.b64encode(image_bytes).decode(),
+    }))
+
+    try:
+        peer_emb = _peer_emb_queue.get(timeout=timeout)
+    except queue.Empty:
+        raise TimeoutError("No peer embedding received within timeout")
+
+    with torch.no_grad():
+        logits, _ = model.fused_forward(own_emb, [peer_emb])
+    return logits.argmax(1).item()

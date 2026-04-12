@@ -21,12 +21,11 @@ def load_peer_macs(path: str) -> list[str]:
 
 class PeerNode:
     def __init__(self, my_name: str, peer_macs: list[str], channel: int,
-                 interval: int, fixed_message: str):
+                 on_message=None):
         self.my_name = my_name
         self.peer_macs = peer_macs
         self.channel = channel
-        self.interval = interval
-        self.fixed_message = fixed_message
+        self.on_message = on_message  # callable(text: str) -> None
 
         self.server_sock = None
         self.conn = None
@@ -154,36 +153,30 @@ class PeerNode:
                     self.log(f"<< {text}")
                     with self._counter_lock:
                         self.messages_received += 1
+                    if self.on_message is not None:
+                        self.on_message(text)
             except OSError:
                 self.clear_connection()
                 buffer = b""
 
-    def _periodic_send_loop(self) -> None:
-        self.log(
-            f"Periodic sender ready — will send '{self.fixed_message}' "
-            f"every {self.interval}s once connected"
-        )
-        while not self.stop_event.is_set():
-            conn = self.get_connection()
-            if conn is None:
-                time.sleep(0.2)
-                continue
+    def send(self, message: str) -> bool:
+        """Send a message immediately over the current connection.
 
-            payload = f"{self.my_name}: {self.fixed_message}\n".encode("utf-8")
-            try:
-                conn.sendall(payload)
-                with self._counter_lock:
-                    self.messages_sent += 1
-                self.log(f">> {self.fixed_message}")
-            except OSError:
-                self.clear_connection()
-                continue
-
-            # Interruptible sleep
-            for _ in range(self.interval * 10):
-                if self.stop_event.is_set():
-                    break
-                time.sleep(0.1)
+        Returns True if the message was sent, False if not connected.
+        """
+        conn = self.get_connection()
+        if conn is None:
+            return False
+        payload = f"{message}\n".encode("utf-8")
+        try:
+            conn.sendall(payload)
+            with self._counter_lock:
+                self.messages_sent += 1
+            self.log(f">> {message}")
+            return True
+        except OSError:
+            self.clear_connection()
+            return False
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -191,8 +184,7 @@ class PeerNode:
         threading.Thread(target=self._start_server, daemon=True).start()
         for mac in self.peer_macs:
             threading.Thread(target=self._connect_loop, args=(mac,), daemon=True).start()
-        for target in (self._recv_loop, self._periodic_send_loop):
-            threading.Thread(target=target, daemon=True).start()
+        threading.Thread(target=self._recv_loop, daemon=True).start()
 
     def stop(self) -> None:
         self.stop_event.set()

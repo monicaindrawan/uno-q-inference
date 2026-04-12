@@ -1,5 +1,3 @@
-import os
-import random
 import socket
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -8,25 +6,10 @@ from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from bluetooth_peer_node import PeerNode, load_peer_macs
-from inference import fusion_inference, solo_inference
-
-peer_node = PeerNode(
-    my_name=socket.gethostname(),
-    peer_macs=load_peer_macs("peers.json"),
-    channel=4,
-    interval=5,
-    fixed_message="PING",
-)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    peer_node.start()
-    yield
-    peer_node.stop()
+from inference import fusion_inference, get_peer_status, solo_inference
 
 
-app = FastAPI(title="Image Classifier", lifespan=lifespan)
+app = FastAPI(title="Image Classifier")
 templates = Jinja2Templates(directory="templates")
 
 
@@ -67,11 +50,4 @@ async def classify(file: UploadFile = File(...)):
 
 @app.get("/peer-status")
 async def peer_status():
-    return {
-        "connected": peer_node.is_connected,
-        "active_peer_mac": peer_node.active_peer_mac,
-        "candidate_peer_macs": peer_node.peer_macs,
-        "messages_sent": peer_node.messages_sent,
-        "messages_received": peer_node.messages_received,
-        "messages_exchanged": peer_node.messages_exchanged,
-    }
+    return get_peer_status()
