@@ -137,7 +137,7 @@ def solo_inference(image_bytes: bytes) -> int:
     return logits.argmax(1).item()
 
 
-def fusion_inference(image_bytes: bytes, timeout: float = 2.0) -> int:
+def fusion_inference(image_bytes: bytes, timeout: float = 10.0) -> int:
     with torch.no_grad():
         own_emb = bytes_to_embedding(image_bytes)
 
