@@ -23,6 +23,7 @@ NODE_CONFIGS = {
     "ir": {"distortion_fn": grayscale_ir, "preset": "pole_fixed", "size": 48},
     "colour_shifted": {"distortion_fn": colour_shifted, "preset": "vehicle_mounted", "size": 48},
 }
+IMG_SIZE = 48
 RANDOM_TRANSFORMS = {
     "ir": [
         (stereo_shift,          0.3,  {"border_mode": "reflect"}),
@@ -81,10 +82,12 @@ def _on_peer_message(text: str) -> None:
 
         if msg_type == "req_emb":
             print("Received req_emb message")
-            # Peer sent us image bytes — compute embedding and send it back.
+            # Peer sent us already-resized image bytes — compute embedding and send it back.
             img_bytes = base64.b64decode(obj["data"])
+            image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
             with torch.no_grad():
-                emb = bytes_to_embedding(img_bytes)
+                image_tensor = transform_image(image).to(DEVICE)
+                emb = image_to_embedding(image_tensor)
             peer_node.send(_embedding_to_msg(emb))
 
         elif msg_type == "emb":
@@ -120,33 +123,39 @@ def get_peer_status():
 
 # ---------------------------------------------------------------------------
 
-
-def bytes_to_transformed_image(image_bytes: bytes):
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB").resize(
-        (cfg["size"], cfg["size"]), Image.BILINEAR)
-    return transform(np.array(img)).unsqueeze(0)
+def bytes_to_resized_image(image_bytes: bytes) -> Image:
+    return Image.open(io.BytesIO(image_bytes)).convert("RGB").resize(
+        (IMG_SIZE, IMG_SIZE), Image.BILINEAR)
 
 
-def bytes_to_embedding(image_bytes: bytes):
-    tensor = bytes_to_transformed_image(image_bytes).to(DEVICE)
-    return model.encoder(tensor)
+def transform_image(image: Image) -> torch.Tensor:
+    return transform(np.array(image)).unsqueeze(0)
+
+
+def image_to_embedding(image: torch.Tensor):
+    return model.encoder(image)
 
 
 def solo_inference(image_bytes: bytes) -> int:
-    tensor = bytes_to_transformed_image(image_bytes).to(DEVICE)
+    image = bytes_to_resized_image(image_bytes)
+    image_tensor = transform_image(image).to(DEVICE)
     with torch.no_grad():
-        logits, _ = model(tensor)
+        logits, _ = model(image_tensor)
     return logits.argmax(1).item()
 
 
 def fusion_inference(image_bytes: bytes, timeout: float = 10.0) -> int:
+    image = bytes_to_resized_image(image_bytes)
     with torch.no_grad():
-        own_emb = bytes_to_embedding(image_bytes)
+        image_tensor = transform_image(image)
+        own_emb = image_to_embedding(image_tensor)
 
-    # Send image bytes to peer so they can compute the embedding with their pipeline.
+    # Send resized image bytes to peer so they can compute the embedding with their pipeline.
+    resized_buf = io.BytesIO()
+    image.save(resized_buf, format="PNG")
     peer_node.send(json.dumps({
         "type": "req_emb",
-        "data": base64.b64encode(image_bytes).decode(),
+        "data": base64.b64encode(resized_buf.getvalue()).decode(),
     }))
 
     try:
@@ -157,3 +166,4 @@ def fusion_inference(image_bytes: bytes, timeout: float = 10.0) -> int:
     with torch.no_grad():
         logits, _ = model.fused_forward(own_emb, [peer_emb])
     return logits.argmax(1).item()
+    pass
