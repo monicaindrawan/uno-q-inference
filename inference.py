@@ -76,3 +76,4 @@ def solo_inference(image_bytes: bytes) -> int:
 
 def fusion_inference(image_bytes: bytes) -> int:
     own_emb = bytes_to_embedding(image_bytes)
+    peer_emb = ...
