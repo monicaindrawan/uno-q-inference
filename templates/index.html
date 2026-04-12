@@ -171,6 +171,36 @@
       color: #2d3a8c;
     }
 
+    #result .confidence-row {
+      margin-top: 0.5rem;
+      font-size: 0.82rem;
+      color: #6a82c8;
+    }
+
+    #result .confidence-row span {
+      font-weight: 600;
+      color: #2d3a8c;
+    }
+
+    #result .reason-row {
+      margin-top: 0.75rem;
+      padding-top: 0.75rem;
+      border-top: 1px solid #c7d4fb;
+      font-size: 0.84rem;
+      color: #4a5a9a;
+      text-align: left;
+      line-height: 1.5;
+    }
+
+    #result .reason-row .reason-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #6a82c8;
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+    }
+
     /* Error */
     #error {
       display: none;
@@ -318,6 +348,11 @@
       <div class="label">Predicted Class</div>
       <div class="class-value" id="class-output">—</div>
       <div class="method-row">Method: <span id="method-output">—</span></div>
+      <div class="confidence-row" id="confidence-row" style="display:none">Confidence: <span id="confidence-output">—</span></div>
+      <div class="reason-row" id="reason-row" style="display:none">
+        <div class="reason-label">Reason</div>
+        <div id="reason-output"></div>
+      </div>
     </div>
 
     <div id="error"></div>
@@ -334,6 +369,10 @@
     const resultEl = document.getElementById('result');
     const classOutput = document.getElementById('class-output');
     const methodOutput = document.getElementById('method-output');
+    const confidenceRow = document.getElementById('confidence-row');
+    const confidenceOutput = document.getElementById('confidence-output');
+    const reasonRow = document.getElementById('reason-row');
+    const reasonOutput = document.getElementById('reason-output');
     const errorEl = document.getElementById('error');
 
     const ALLOWED_EXTENSIONS = new Set(['.ppm']);
@@ -406,8 +445,24 @@
           errorEl.textContent = data.error;
           errorEl.style.display = 'block';
         } else {
-          classOutput.textContent = data.predicted_class;
+          classOutput.textContent = data.pred_class;
           methodOutput.textContent = data.method ?? '—';
+
+          if (data.confidence != null) {
+            const pct = (data.confidence * 100).toFixed(1);
+            confidenceOutput.textContent = `${pct}%`;
+            confidenceRow.style.display = 'block';
+          } else {
+            confidenceRow.style.display = 'none';
+          }
+
+          if (data.reason) {
+            reasonOutput.textContent = data.reason;
+            reasonRow.style.display = 'block';
+          } else {
+            reasonRow.style.display = 'none';
+          }
+
           resultEl.style.display = 'block';
         }
       } catch (err) {
