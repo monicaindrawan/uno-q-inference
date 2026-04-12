@@ -150,7 +150,6 @@ class PeerNode:
                 while b"\n" in buffer:
                     line, buffer = buffer.split(b"\n", 1)
                     text = line.decode("utf-8", errors="replace")
-                    self.log(f"<< {text}")
                     with self._counter_lock:
                         self.messages_received += 1
                     if self.on_message is not None:
@@ -172,7 +171,6 @@ class PeerNode:
             conn.sendall(payload)
             with self._counter_lock:
                 self.messages_sent += 1
-            self.log(f">> {message}")
             return True
         except OSError:
             self.clear_connection()

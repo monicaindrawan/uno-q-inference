@@ -80,6 +80,7 @@ def _on_peer_message(text: str) -> None:
         msg_type = obj.get("type")
 
         if msg_type == "req_emb":
+            print("Received req_emb message")
             # Peer sent us image bytes — compute embedding and send it back.
             img_bytes = base64.b64decode(obj["data"])
             with torch.no_grad():
@@ -87,6 +88,7 @@ def _on_peer_message(text: str) -> None:
             peer_node.send(_embedding_to_msg(emb))
 
         elif msg_type == "emb":
+            print("Received emb message")
             arr = np.frombuffer(base64.b64decode(obj["data"]), dtype=np.float32).copy()
             emb = torch.from_numpy(arr.reshape(obj["shape"])).to(DEVICE)
             try:
