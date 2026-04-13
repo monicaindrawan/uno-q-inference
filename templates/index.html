@@ -35,8 +35,26 @@
     .subtitle {
       font-size: 0.9rem;
       color: #666;
-      margin-bottom: 1.75rem;
+      margin-bottom: 1rem;
     }
+
+    /* Node info row: name (left) + operator badge (right) */
+    .node-info {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+
+    .node-name {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.82rem;
+    }
+
+    .node-name .node-label { color: #999; font-weight: 500; }
+    .node-name .node-value { color: #111; font-weight: 700; }
 
     /* Drop zone */
     .drop-zone {
@@ -271,7 +289,7 @@
       border-radius: 10px;
       font-size: 0.82rem;
       font-weight: 500;
-      margin-bottom: 1.5rem;
+      margin-bottom: 1.75rem;
       border: 1px solid transparent;
       transition: background 0.3s, border-color 0.3s;
     }
@@ -303,16 +321,58 @@
       font-size: 0.78rem;
       opacity: 0.75;
     }
+
+    /* Merge operator badge */
+    .operator-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.35rem 0.65rem;
+      background: #f3f0ff;
+      border: 1px solid #c4b5fd;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      color: #5b21b6;
+      font-weight: 500;
+    }
+
+    .operator-badge .op-icon { font-size: 0.85rem; line-height: 1; }
+    .operator-badge .op-name { font-weight: 700; }
   </style>
 </head>
 <body>
   <div class="card">
     <h1>GTSRB Classifier</h1>
-    <p class="subtitle">
-      Node: <strong>{{ node_name }}</strong>
-      <br>
-      Upload an image to get a predicted class.
-    </p>
+    <p class="subtitle">Upload an image to get a predicted class.</p>
+
+    <div class="node-info">
+      <div class="node-name">
+        <span class="node-label">Node</span>
+        <span class="node-value">{{ node_name }}</span>
+      </div>
+
+      {% if merge_operator == "confidence_weighted_mean" %}
+      <div class="operator-badge">
+        <span class="op-icon">⚖️</span>
+        <span class="op-name">Confidence Weighted Mean</span>
+      </div>
+      {% elif merge_operator == "robust_median" %}
+      <div class="operator-badge">
+        <span class="op-icon">🛡️</span>
+        <span class="op-name">Robust Median</span>
+      </div>
+      {% elif merge_operator == "top_k_confident" %}
+      <div class="operator-badge">
+        <span class="op-icon">🏆</span>
+        <span class="op-name">Top-K Confident</span>
+      </div>
+      {% else %}
+      <div class="operator-badge">
+        <span class="op-icon">🧠</span>
+        <span class="op-name">Per-Node Fusion</span>
+      </div>
+      {% endif %}
+    </div>
 
     <div class="peer-status disconnected" id="peer-status">
       <span class="dot"></span>

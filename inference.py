@@ -9,10 +9,12 @@ import os
 import socket
 
 from distortions_final import RandomTransformChain, colour_shifted, grayscale_ir, NodeTransform, horizontal_sign_angle, overcast_flat_light, random_occlusion, sign_approaching, stereo_shift, vertical_sign_angle
+from merge_operators import ConfidenceWeightedMean, RobustMedian, TopKConfident
 from node_model import NodeModel
 from bluetooth_peer_node import PeerNode, load_peer_macs
 
 NODE_NAME = os.environ.get("NODE_NAME", "ir")
+MERGE_OPERATOR = os.environ.get("MERGE_OPERATOR", None)
 CONFIDENCE_THRESHOLD = 0.6
 
 DEVICE = "cpu"
@@ -64,15 +66,16 @@ transform = NodeTransform(
 
 # -- Peer node embedding via Bluetooth --------------------------------------
 
-_peer_emb_queue: queue.Queue[torch.Tensor] = queue.Queue(maxsize=1)
+_peer_emb_queue: queue.Queue[tuple] = queue.Queue(maxsize=1)
 
 
-def _embedding_to_msg(emb: torch.Tensor) -> str:
+def _embedding_to_msg(emb: torch.Tensor, confidence: float) -> str:
     arr = emb.detach().cpu().numpy().astype(np.float32)
     return json.dumps({
         "type": "emb",
         "shape": list(arr.shape),
         "data": base64.b64encode(arr.tobytes()).decode(),
+        "confidence": confidence,
     })
 
 
@@ -89,17 +92,20 @@ def _on_peer_message(text: str) -> None:
             with torch.no_grad():
                 image_tensor = transform_image(image).to(DEVICE)
                 emb = image_to_embedding(image_tensor)
-            peer_node.send(_embedding_to_msg(emb))
+                logits, _ = model(image_tensor)
+                confidence = confidence_entropy(logits)
+            peer_node.send(_embedding_to_msg(emb, confidence))
 
         elif msg_type == "emb":
             print("Received emb message")
             arr = np.frombuffer(base64.b64decode(obj["data"]), dtype=np.float32).copy()
             emb = torch.from_numpy(arr.reshape(obj["shape"])).to(DEVICE)
+            conf = float(obj.get("confidence", 0.0))
             try:
                 _peer_emb_queue.get_nowait()  # discard any stale value
             except queue.Empty:
                 pass
-            _peer_emb_queue.put(emb)
+            _peer_emb_queue.put((emb, conf))
 
     except Exception:
         pass
@@ -153,6 +159,8 @@ def fusion_inference(image_bytes: bytes, timeout: float = 5.0) -> int:
     with torch.no_grad():
         image_tensor = transform_image(image)
         own_emb = image_to_embedding(image_tensor)
+        logits, _ = model(image_tensor)
+        confidence = confidence_entropy(logits)
 
     # Send resized image bytes to peer so they can compute the embedding with their pipeline.
     resized_buf = io.BytesIO()
@@ -163,7 +171,7 @@ def fusion_inference(image_bytes: bytes, timeout: float = 5.0) -> int:
     }))
 
     try:
-        peer_emb = _peer_emb_queue.get(timeout=timeout)
+        peer_emb, peer_conf = _peer_emb_queue.get(timeout=timeout)
     except queue.Empty:
         print("No peer embedding received within timeout")
         return {
@@ -173,7 +181,26 @@ def fusion_inference(image_bytes: bytes, timeout: float = 5.0) -> int:
         }
 
     with torch.no_grad():
-        logits, _ = model.fused_forward(own_emb, [peer_emb])
+        if MERGE_OPERATOR is None:
+            logits, _ = model.fused_forward(own_emb, [peer_emb])
+        else:
+            # Use external merge operator
+            peer_contexts = {
+                "confidences": [peer_conf],
+                "requesting_confidence": confidence,
+            }
+
+            if MERGE_OPERATOR == 'confidence_weighted_mean':
+                merge_operator = ConfidenceWeightedMean()
+            elif MERGE_OPERATOR == 'robust_median':
+                merge_operator = RobustMedian()
+            elif MERGE_OPERATOR == 'top_k_confident':
+                merge_operator = TopKConfident()
+
+            merged = merge_operator.merge(own_emb, [peer_emb], peer_contexts)
+            # Use requesting node's classifier
+            logits = model.classifier(merged)
+
     return {
         "pred_class": logits.argmax(1).item(),
         "method": "fusion_inference"
@@ -215,7 +242,7 @@ def collaborative_inference(image_bytes: bytes, timeout: float = 5.0) -> dict:
     }))
 
     try:
-        peer_emb = _peer_emb_queue.get(timeout=timeout)
+        peer_emb, peer_conf = _peer_emb_queue.get(timeout=timeout)
     except queue.Empty:
         print("No peer embedding received within timeout")
         return {
@@ -226,7 +253,26 @@ def collaborative_inference(image_bytes: bytes, timeout: float = 5.0) -> dict:
         }
 
     with torch.no_grad():
-        fused_logits, _ = model.fused_forward(own_emb, [peer_emb])
+        if MERGE_OPERATOR is None:
+            fused_logits, _ = model.fused_forward(own_emb, [peer_emb])
+        else:
+            # Use external merge operator
+            peer_contexts = {
+                "confidences": [peer_conf],
+                "requesting_confidence": confidence,
+            }
+
+            if MERGE_OPERATOR == 'confidence_weighted_mean':
+                merge_operator = ConfidenceWeightedMean()
+            elif MERGE_OPERATOR == 'robust_median':
+                merge_operator = RobustMedian()
+            elif MERGE_OPERATOR == 'top_k_confident':
+                merge_operator = TopKConfident()
+
+            fused_logits = model.classifier(
+                merge_operator.merge(own_emb, [peer_emb], peer_contexts)
+            )
+
     return {
         "pred_class": fused_logits.argmax(1).item(),
         "method": "fusion_inference",
