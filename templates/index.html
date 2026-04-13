@@ -322,8 +322,9 @@
       opacity: 0.75;
     }
 
-    /* Merge operator badge */
-    .operator-badge {
+    /* Merge operator pill (clickable, opens dropdown) */
+    .op-trigger {
+      position: relative;
       display: inline-flex;
       align-items: center;
       gap: 0.4rem;
@@ -333,11 +334,61 @@
       border-radius: 999px;
       font-size: 0.75rem;
       color: #5b21b6;
-      font-weight: 500;
+      font-weight: 600;
+      cursor: pointer;
+      user-select: none;
+      transition: background 0.15s, border-color 0.15s;
     }
 
-    .operator-badge .op-icon { font-size: 0.85rem; line-height: 1; }
-    .operator-badge .op-name { font-weight: 700; }
+    .op-trigger:hover { background: #ede9fe; border-color: #a78bfa; }
+    .op-trigger.open  { background: #ede9fe; border-color: #a78bfa; }
+
+    .op-chevron {
+      font-size: 0.6rem;
+      opacity: 0.55;
+      transition: transform 0.15s;
+    }
+
+    .op-trigger.open .op-chevron { transform: rotate(180deg); }
+
+    .op-dropdown {
+      display: none;
+      position: absolute;
+      right: 0;
+      top: calc(100% + 6px);
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.10);
+      z-index: 100;
+      min-width: 200px;
+      overflow: hidden;
+    }
+
+    .op-trigger.open .op-dropdown { display: block; }
+
+    .op-option {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.6rem 0.9rem;
+      font-size: 0.82rem;
+      color: #333;
+      cursor: pointer;
+      transition: background 0.1s;
+      font-weight: 400;
+    }
+
+    .op-option:hover { background: #f5f3ff; color: #5b21b6; }
+
+    .op-option.active {
+      background: #f3f0ff;
+      color: #5b21b6;
+      font-weight: 700;
+    }
+
+    .op-option .opt-check { margin-left: auto; font-size: 0.7rem; opacity: 0; }
+    .op-option.active .opt-check { opacity: 1; }
   </style>
 </head>
 <body>
@@ -351,27 +402,17 @@
         <span class="node-value">{{ node_name }}</span>
       </div>
 
-      {% if merge_operator == "confidence_weighted_mean" %}
-      <div class="operator-badge">
-        <span class="op-icon">⚖️</span>
-        <span class="op-name">Confidence Weighted Mean</span>
+      <div class="op-trigger" id="op-trigger" role="button" tabindex="0">
+        <span id="op-badge-icon"></span>
+        <span id="op-badge-name"></span>
+        <span class="op-chevron">▾</span>
+        <div class="op-dropdown" id="op-dropdown">
+          <div class="op-option active" data-value="">🧠 Per-Node Fusion <span class="opt-check">✓</span></div>
+          <div class="op-option" data-value="confidence_weighted_mean">⚖️ Confidence Weighted Mean <span class="opt-check">✓</span></div>
+          <div class="op-option" data-value="robust_median">🛡️ Robust Median <span class="opt-check">✓</span></div>
+          <div class="op-option" data-value="top_k_confident">🏆 Top-K Confident <span class="opt-check">✓</span></div>
+        </div>
       </div>
-      {% elif merge_operator == "robust_median" %}
-      <div class="operator-badge">
-        <span class="op-icon">🛡️</span>
-        <span class="op-name">Robust Median</span>
-      </div>
-      {% elif merge_operator == "top_k_confident" %}
-      <div class="operator-badge">
-        <span class="op-icon">🏆</span>
-        <span class="op-name">Top-K Confident</span>
-      </div>
-      {% else %}
-      <div class="operator-badge">
-        <span class="op-icon">🧠</span>
-        <span class="op-name">Per-Node Fusion</span>
-      </div>
-      {% endif %}
     </div>
 
     <div class="peer-status disconnected" id="peer-status">
@@ -502,7 +543,10 @@
         formData.append('file', selectedFile);
 
         const inferenceMethod = document.querySelector('input[name="method"]:checked').value;
-        const resp = await fetch(`/classify?method=${inferenceMethod}`, { method: 'POST', body: formData });
+        const mergeOp = selectedMergeOp;
+        const params = new URLSearchParams({ method: inferenceMethod });
+        if (mergeOp) params.set('merge_operator', mergeOp);
+        const resp = await fetch(`/classify?${params}`, { method: 'POST', body: formData });
         const data = await resp.json();
 
         if (data.error) {
@@ -537,6 +581,47 @@
         classifyBtn.textContent = 'Classify';
       }
     });
+    // --- Merge operator dropdown ---
+    const OP_META = {
+      "":                         { icon: "🧠", name: "Per-Node Fusion" },
+      "confidence_weighted_mean": { icon: "⚖️", name: "Conf. Weighted Mean" },
+      "robust_median":            { icon: "🛡️", name: "Robust Median" },
+      "top_k_confident":          { icon: "🏆", name: "Top-K Confident" },
+    };
+
+    const opTrigger  = document.getElementById('op-trigger');
+    const opDropdown = document.getElementById('op-dropdown');
+    const opBadgeIcon = document.getElementById('op-badge-icon');
+    const opBadgeName = document.getElementById('op-badge-name');
+    const opOptions  = opDropdown.querySelectorAll('.op-option');
+
+    let selectedMergeOp = "";
+
+    function selectMergeOp(value) {
+      selectedMergeOp = value;
+      const meta = OP_META[value] ?? OP_META[""];
+      opBadgeIcon.textContent = meta.icon;
+      opBadgeName.textContent = meta.name;
+      opOptions.forEach(o => o.classList.toggle('active', o.dataset.value === value));
+    }
+
+    opTrigger.addEventListener('click', (e) => {
+      e.stopPropagation();
+      opTrigger.classList.toggle('open');
+    });
+
+    opOptions.forEach(opt => {
+      opt.addEventListener('click', (e) => {
+        e.stopPropagation();
+        selectMergeOp(opt.dataset.value);
+        opTrigger.classList.remove('open');
+      });
+    });
+
+    document.addEventListener('click', () => opTrigger.classList.remove('open'));
+
+    selectMergeOp("");
+
     // --- Peer status polling ---
     const peerStatusEl  = document.getElementById('peer-status');
     const peerStatusText = document.getElementById('peer-status-text');

@@ -5,7 +5,7 @@ from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from inference import MERGE_OPERATOR, NODE_NAME, collaborative_inference, fusion_inference, get_peer_status, solo_inference
+from inference import NODE_NAME, collaborative_inference, fusion_inference, get_peer_status, solo_inference
 
 
 app = FastAPI(title="Image Classifier")
@@ -14,11 +14,11 @@ templates = Jinja2Templates(directory="templates")
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse(request, "index.html", {"node_name": NODE_NAME, "merge_operator": MERGE_OPERATOR})
+    return templates.TemplateResponse(request, "index.html", {"node_name": NODE_NAME, "merge_operator": None})
 
 
 @app.post("/classify")
-async def classify(file: UploadFile = File(...), method: str = "collaborative"):
+async def classify(file: UploadFile = File(...), method: str = "collaborative", merge_operator: str | None = None):
     ext = Path(file.filename).suffix.lower()
     if ext != ".ppm":
         return {"error": f"Unsupported file type '{ext}'. Only .ppm files are accepted."}
@@ -26,11 +26,11 @@ async def classify(file: UploadFile = File(...), method: str = "collaborative"):
     image_bytes = await file.read()
 
     if method == "fusion":
-        output = fusion_inference(image_bytes)
+        output = fusion_inference(image_bytes, merge_operator=merge_operator)
     elif method == "solo":
         output = solo_inference(image_bytes)
     else:
-        output = collaborative_inference(image_bytes)
+        output = collaborative_inference(image_bytes, merge_operator=merge_operator)
 
     return {
         "filename": file.filename,

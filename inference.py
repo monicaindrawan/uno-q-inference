@@ -14,8 +14,18 @@ from node_model import NodeModel
 from bluetooth_peer_node import PeerNode, load_peer_macs
 
 NODE_NAME = os.environ.get("NODE_NAME", "ir")
-MERGE_OPERATOR = os.environ.get("MERGE_OPERATOR", None)
 CONFIDENCE_THRESHOLD = 0.6
+
+
+def _build_merge_op(op: str | None):
+    """Instantiate a merge operator from its name. Falls back to env default if op is None."""
+    if op == "confidence_weighted_mean":
+        return ConfidenceWeightedMean()
+    if op == "robust_median":
+        return RobustMedian()
+    if op == "top_k_confident":
+        return TopKConfident()
+    return None
 
 DEVICE = "cpu"
 MODEL_PATHS = {
@@ -154,7 +164,7 @@ def solo_inference(image_bytes: bytes) -> int:
     }
 
 
-def fusion_inference(image_bytes: bytes, timeout: float = 5.0) -> int:
+def fusion_inference(image_bytes: bytes, merge_operator: str | None = None, timeout: float = 5.0) -> int:
     image = bytes_to_resized_image(image_bytes)
     with torch.no_grad():
         image_tensor = transform_image(image)
@@ -181,25 +191,15 @@ def fusion_inference(image_bytes: bytes, timeout: float = 5.0) -> int:
         }
 
     with torch.no_grad():
-        if MERGE_OPERATOR is None:
+        merge_op = _build_merge_op(merge_operator)
+        if merge_op is None:
             logits, _ = model.fused_forward(own_emb, [peer_emb])
         else:
-            # Use external merge operator
             peer_contexts = {
                 "confidences": [peer_conf],
                 "requesting_confidence": confidence,
             }
-
-            if MERGE_OPERATOR == 'confidence_weighted_mean':
-                merge_operator = ConfidenceWeightedMean()
-            elif MERGE_OPERATOR == 'robust_median':
-                merge_operator = RobustMedian()
-            elif MERGE_OPERATOR == 'top_k_confident':
-                merge_operator = TopKConfident()
-
-            merged = merge_operator.merge(own_emb, [peer_emb], peer_contexts)
-            # Use requesting node's classifier
-            logits = model.classifier(merged)
+            logits = model.classifier(merge_op.merge(own_emb, [peer_emb], peer_contexts))
 
     return {
         "pred_class": logits.argmax(1).item(),
@@ -215,7 +215,7 @@ def confidence_entropy(logits: torch.Tensor) -> float:
     return (1.0 - entropy / max_entropy).item()
 
 
-def collaborative_inference(image_bytes: bytes, timeout: float = 5.0) -> dict:
+def collaborative_inference(image_bytes: bytes, merge_operator: str | None = None, timeout: float = 5.0) -> dict:
     image = bytes_to_resized_image(image_bytes)
     with torch.no_grad():
         image_tensor = transform_image(image).to(DEVICE)
@@ -253,25 +253,15 @@ def collaborative_inference(image_bytes: bytes, timeout: float = 5.0) -> dict:
         }
 
     with torch.no_grad():
-        if MERGE_OPERATOR is None:
+        merge_op = _build_merge_op(merge_operator)
+        if merge_op is None:
             fused_logits, _ = model.fused_forward(own_emb, [peer_emb])
         else:
-            # Use external merge operator
             peer_contexts = {
                 "confidences": [peer_conf],
                 "requesting_confidence": confidence,
             }
-
-            if MERGE_OPERATOR == 'confidence_weighted_mean':
-                merge_operator = ConfidenceWeightedMean()
-            elif MERGE_OPERATOR == 'robust_median':
-                merge_operator = RobustMedian()
-            elif MERGE_OPERATOR == 'top_k_confident':
-                merge_operator = TopKConfident()
-
-            fused_logits = model.classifier(
-                merge_operator.merge(own_emb, [peer_emb], peer_contexts)
-            )
+            fused_logits = model.classifier(merge_op.merge(own_emb, [peer_emb], peer_contexts))
 
     return {
         "pred_class": fused_logits.argmax(1).item(),
