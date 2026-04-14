@@ -25,7 +25,9 @@ def _build_merge_op(op: str | None):
         return RobustMedian()
     if op == "top_k_confident":
         return TopKConfident()
-    return None
+    if op == "fusion_head":
+        return None
+    raise ValueError(f"Unknown merge operator: {op!r}")
 
 DEVICE = "cpu"
 MODEL_PATHS = {
