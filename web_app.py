@@ -14,11 +14,11 @@ templates = Jinja2Templates(directory="templates")
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse(request, "index.html", {"node_name": NODE_NAME, "merge_operator": None})
+    return templates.TemplateResponse(request, "index.html", {"node_name": NODE_NAME, "merge_operator": "fusion_head"})
 
 
 @app.post("/classify")
-async def classify(file: UploadFile = File(...), method: str = "collaborative", merge_operator: str | None = None):
+async def classify(file: UploadFile = File(...), method: str = "collaborative", merge_operator: str = 'fusion_head'):
     ext = Path(file.filename).suffix.lower()
     if ext != ".ppm":
         return {"error": f"Unsupported file type '{ext}'. Only .ppm files are accepted."}

@@ -407,7 +407,7 @@
         <span id="op-badge-name"></span>
         <span class="op-chevron">▾</span>
         <div class="op-dropdown" id="op-dropdown">
-          <div class="op-option active" data-value="">🧠 Per-Node Fusion <span class="opt-check">✓</span></div>
+          <div class="op-option active" data-value="fusion_head">🧠 Per-Node Fusion <span class="opt-check">✓</span></div>
           <div class="op-option" data-value="confidence_weighted_mean">⚖️ Confidence Weighted Mean <span class="opt-check">✓</span></div>
           <div class="op-option" data-value="robust_median">🛡️ Robust Median <span class="opt-check">✓</span></div>
           <div class="op-option" data-value="top_k_confident">🏆 Top-K Confident <span class="opt-check">✓</span></div>
@@ -583,7 +583,7 @@
     });
     // --- Merge operator dropdown ---
     const OP_META = {
-      "":                         { icon: "🧠", name: "Per-Node Fusion" },
+      "fusion_head":              { icon: "🧠", name: "Per-Node Fusion" },
       "confidence_weighted_mean": { icon: "⚖️", name: "Conf. Weighted Mean" },
       "robust_median":            { icon: "🛡️", name: "Robust Median" },
       "top_k_confident":          { icon: "🏆", name: "Top-K Confident" },
@@ -599,7 +599,7 @@
 
     function selectMergeOp(value) {
       selectedMergeOp = value;
-      const meta = OP_META[value] ?? OP_META[""];
+      const meta = OP_META[value] ?? OP_META["fusion_head"];
       opBadgeIcon.textContent = meta.icon;
       opBadgeName.textContent = meta.name;
       opOptions.forEach(o => o.classList.toggle('active', o.dataset.value === value));
@@ -620,7 +620,7 @@
 
     document.addEventListener('click', () => opTrigger.classList.remove('open'));
 
-    selectMergeOp("");
+    selectMergeOp("fusion_head");
 
     // --- Peer status polling ---
     const peerStatusEl  = document.getElementById('peer-status');
