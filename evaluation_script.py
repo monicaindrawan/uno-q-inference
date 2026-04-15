@@ -7,7 +7,7 @@ import random
 import csv
 import pandas as pd
 
-BASE_URL = os.environ.get("BASE_URL", "http://192.168.1.67:8000")
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
 TEST_CSV = "./GTSRB_data/Test.csv"
 
 
@@ -106,7 +106,8 @@ def classify_image(image_path: Path, method: str = "collaborative") -> dict:
         response = requests.post(
             f"{BASE_URL}/classify",
             files={"file": (image_path.name, f, "image/x-portable-pixmap")},
-            params={"method": method, "merge_operator": "confidence_weighted_mean"},
+            params={"method": method, "merge_operator": "fusion_head"
+            ""},
         )
     response.raise_for_status()
     return response.json()
@@ -156,6 +157,6 @@ def main():
         )
 
 if __name__ == "__main__":
-    # download_gtsrb_dataset()
-    # prepare_gtsrb_dataset()
+    download_gtsrb_dataset()
+    prepare_gtsrb_dataset()
     main()

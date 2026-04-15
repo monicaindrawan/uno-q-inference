@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
+import time
 
 from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import HTMLResponse
@@ -25,12 +26,14 @@ async def classify(file: UploadFile = File(...), method: str = "collaborative", 
 
     image_bytes = await file.read()
 
+    t0 = time.perf_counter()
     if method == "fusion":
         output = fusion_inference(image_bytes, merge_operator=merge_operator)
     elif method == "solo":
         output = solo_inference(image_bytes)
     else:
         output = collaborative_inference(image_bytes, merge_operator=merge_operator)
+    inference_ms = (time.perf_counter() - t0) * 1000
 
     return {
         "filename": file.filename,
@@ -38,7 +41,8 @@ async def classify(file: UploadFile = File(...), method: str = "collaborative", 
         "pred_class": output["pred_class"],
         "reason": output.get("reason"),
         "confidence": output.get("confidence"),
-        "extra_info": output.get("extra_info")
+        "extra_info": output.get("extra_info"),
+        "inference_ms": round(inference_ms, 1),
     }
 
 

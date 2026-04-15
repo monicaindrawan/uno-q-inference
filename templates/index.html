@@ -219,6 +219,18 @@
       margin-bottom: 0.25rem;
     }
 
+    #result .timing-row {
+      margin-top: 0.5rem;
+      font-size: 0.82rem;
+      color: #6a82c8;
+    }
+
+    #result .timing-row span {
+      font-weight: 600;
+      color: #2d3a8c;
+    }
+
+
     /* Error */
     #error {
       display: none;
@@ -454,6 +466,7 @@
       <div class="class-value" id="class-output">—</div>
       <div class="method-row">Method: <span id="method-output">—</span></div>
       <div class="confidence-row" id="confidence-row" style="display:none">Confidence: <span id="confidence-output">—</span></div>
+      <div class="timing-row" id="timing-row" style="display:none">Inference time: <span id="timing-output">—</span></div>
       <div class="reason-row" id="reason-row" style="display:none">
         <div class="reason-label">Reason</div>
         <div id="reason-output"></div>
@@ -476,6 +489,8 @@
     const methodOutput = document.getElementById('method-output');
     const confidenceRow = document.getElementById('confidence-row');
     const confidenceOutput = document.getElementById('confidence-output');
+    const timingRow = document.getElementById('timing-row');
+    const timingOutput = document.getElementById('timing-output');
     const reasonRow = document.getElementById('reason-row');
     const reasonOutput = document.getElementById('reason-output');
     const errorEl = document.getElementById('error');
@@ -562,6 +577,13 @@
             confidenceRow.style.display = 'block';
           } else {
             confidenceRow.style.display = 'none';
+          }
+
+          if (data.inference_ms != null) {
+            timingOutput.textContent = `${data.inference_ms} ms`;
+            timingRow.style.display = 'block';
+          } else {
+            timingRow.style.display = 'none';
           }
 
           if (data.reason) {
