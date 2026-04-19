@@ -1,5 +1,6 @@
 from pathlib import Path
 import shutil
+import time
 import torchvision
 import requests
 import os
@@ -7,7 +8,7 @@ import random
 import csv
 import pandas as pd
 
-BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
+BASE_URL = os.environ.get("BASE_URL", "http://192.168.0.102:8000") 
 TEST_CSV = "./GTSRB_data/Test.csv"
 
 
@@ -122,14 +123,17 @@ def main():
     collaborative_fusion_trigger_count = 0
     collaborative_fusion_fixed_count = 0
     collaborative_fusion_broke_count = 0
+    solo_total_time = 0.0
+    fusion_total_time = 0.0
+    collaborative_total_time = 0.0
 
     for _, row in pd.read_csv(TEST_CSV).iterrows():
         image_path = Path(row["Path"])
         label = row["ClassId"]
 
-        solo_output = classify_image(image_path, "solo")
-        fusion_output = classify_image(image_path, "fusion")
-        collaborative_output = classify_image(image_path, "collaborative")
+        t0 = time.perf_counter(); solo_output = classify_image(image_path, "solo"); solo_total_time += time.perf_counter() - t0
+        t0 = time.perf_counter(); fusion_output = classify_image(image_path, "fusion"); fusion_total_time += time.perf_counter() - t0
+        t0 = time.perf_counter(); collaborative_output = classify_image(image_path, "collaborative"); collaborative_total_time += time.perf_counter() - t0
 
         test_count += 1
         if solo_output['pred_class'] == label:
@@ -153,7 +157,10 @@ def main():
             f"Collaborative: {collaborative_correct_count}/{test_count} ({100*collaborative_correct_count/test_count:.1f}%)  "
             f"| Fusion triggered: {collaborative_fusion_trigger_count}  "
             f"Fixed: {collaborative_fusion_fixed_count}  "
-            f"Broke: {collaborative_fusion_broke_count}"
+            f"Broke: {collaborative_fusion_broke_count}  "
+            f"| Avg ms/img — Solo: {1000*solo_total_time/test_count:.1f}  "
+            f"Fusion: {1000*fusion_total_time/test_count:.1f}  "
+            f"Collaborative: {1000*collaborative_total_time/test_count:.1f}"
         )
 
 if __name__ == "__main__":

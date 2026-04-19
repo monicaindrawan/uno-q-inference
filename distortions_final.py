@@ -1,19 +1,3 @@
-"""
-distortions_final.py
-====================
-Consolidated distortion library for the Node Learning training pipeline.
-
-Contains only the distortions actively used by the 4-node system
-(IR, colour_shifted, cheap, normal) plus the random environmental
-transforms applied on top (stereo, occlusion, angle, zoom, overcast).
-
-See distortions.py / distortions_v2.py / distortions_v3.py for the full
-catalogue of available distortions.
-
-Input convention (all functions):
-  np.ndarray (H, W, 3) uint8 RGB
-"""
-
 import numpy as np
 from PIL import Image
 import torch
