@@ -1,3 +1,36 @@
+"""
+Node Learning on GTSRB (German Traffic Sign Recognition Benchmark)
+==================================================================
+
+Simulates decentralised learning where 4 camera nodes observe the same traffic
+signs through different degradations:
+
+    1. Cheap Sensor     — low-res blur + noise   (budget doorbell/IP cam)
+    2. Grayscale / IR   — monochrome + noise      (IR camera, B&W CCTV)
+    3. Colour Shifted   — bad white balance        (sodium/fluorescent/tungsten)
+    4. Normal Camera    — no degradation           (decent vehicle dashcam)
+
+Each node trains its own CNN encoder + classifier independently on its
+distorted view of the GTSRB training set (43 traffic sign classes, ~39K images,
+resized to 48x48).
+
+A cross-attention fusion head (transformer-style) is then trained on frozen
+node embeddings. During collaborative inference, when a node's confidence
+(normalised entropy) falls below a threshold, it requests embeddings from
+peers and the fusion head combines them via multi-head self-attention.
+
+Regularisation:
+    - L2-normalised embeddings before attention (prevents magnitude bias)
+    - Entropy penalty on pooling weights (prevents attention collapse)
+
+Metrics reported:
+    - Solo accuracy per node and clean baseline
+    - Fusion-always accuracy + average attention weights
+    - Collaborative inference: triggered rate, fixed/broke/kept stats
+    - Collaboration Efficiency (CE) from the Node Learning paper (Sec 3.5)
+
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

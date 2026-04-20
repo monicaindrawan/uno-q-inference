@@ -4,3 +4,5 @@ __pycache__
 GTSRB_data
 GTSRB_torchvision
 temp_gtsrb
+.DS_Store
+*.ppm

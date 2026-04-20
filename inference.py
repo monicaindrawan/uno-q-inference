@@ -1,3 +1,24 @@
+"""
+Inference — Node Inference Engine
+==================================
+
+Loads the per-node model and distortion pipeline at import time, then exposes
+three inference functions called by web_app.py:
+
+    solo_inference()          — classify using only this node's CNN
+    fusion_inference()        — always request peer embedding and fuse
+    collaborative_inference() — use solo unless confidence < threshold,
+                                then fall back to fusion
+
+Peer communication uses Bluetooth RFCOMM (via PeerNode). Two message types:
+    req_emb  — send a resized PNG to the peer and ask for its embedding
+    emb      — receive the peer's embedding + confidence as base64 JSON
+
+The active node profile (ir or colour_shifted) is set via the NODE_NAME
+environment variable, which selects the model weights, distortion function,
+and augmentation chain.
+"""
+
 import io
 import json
 import base64
@@ -14,11 +35,18 @@ from node_model import NodeModel
 from bluetooth_peer_node import PeerNode, load_peer_macs
 
 NODE_NAME = os.environ.get("NODE_NAME", "ir")
-CONFIDENCE_THRESHOLD = 0.6
+CONFIDENCE_THRESHOLD = 0.6  # below this, collaborative mode triggers fusion
 
+
+# =============================================================================
+# Config
+# Per-node model paths, distortion functions, and augmentation probabilities.
+# NODE_NAME selects the active profile at startup.
+# =============================================================================
 
 def _build_merge_op(op: str | None):
-    """Instantiate a merge operator from its name. Falls back to env default if op is None."""
+    """Instantiate a merge operator from its name. Returns None for fusion_head
+    (the model's built-in cross-attention path is used instead)."""
     if op == "confidence_weighted_mean":
         return ConfidenceWeightedMean()
     if op == "robust_median":
@@ -30,15 +58,22 @@ def _build_merge_op(op: str | None):
     raise ValueError(f"Unknown merge operator: {op!r}")
 
 DEVICE = "cpu"
+
+# Maps node name to its trained model checkpoint
 MODEL_PATHS = {
     "ir": "models/gtsrb_ir_2node_with_fusion.pt",
     "colour_shifted": "models/gtsrb_colour_shifted_2node_with_fusion.pt"
 }
+
+# Maps node name to its distortion function and geometric preset
 NODE_CONFIGS = {
     "ir": {"distortion_fn": grayscale_ir, "preset": "pole_fixed", "size": 48},
     "colour_shifted": {"distortion_fn": colour_shifted, "preset": "vehicle_mounted", "size": 48},
 }
+
 IMG_SIZE = 48
+
+# Per-node random augmentation chain: (transform_fn, probability, kwargs)
 RANDOM_TRANSFORMS = {
     "ir": [
         (stereo_shift,          0.3,  {"border_mode": "reflect"}),
@@ -58,7 +93,12 @@ RANDOM_TRANSFORMS = {
     ],
 }
 
-# Model and transform are initialized once at import time and reused for every request.
+
+# =============================================================================
+# Model & Transform Initialisation
+# Loaded once at import time and reused for every request.
+# =============================================================================
+
 print(f"Loading model for node {NODE_NAME} from {MODEL_PATHS[NODE_NAME]}")
 model = NodeModel(include_fusion=True)
 model.load_state_dict(torch.load(MODEL_PATHS.get(NODE_NAME), map_location=DEVICE))
@@ -76,12 +116,20 @@ transform = NodeTransform(
     random_transforms=random_chain,
 )
 
-# -- Peer node embedding via Bluetooth --------------------------------------
+
+# =============================================================================
+# Bluetooth Peer Embedding Exchange
+# _peer_emb_queue holds at most one pending embedding from the peer.
+# _on_peer_message() handles two message types:
+#   req_emb — peer wants our embedding; compute and send it back
+#   emb     — peer's embedding arriving in response to our request
+# =============================================================================
 
 _peer_emb_queue: queue.Queue[tuple] = queue.Queue(maxsize=1)
 
 
 def _embedding_to_msg(emb: torch.Tensor, confidence: float) -> str:
+    """Serialise an embedding tensor to a base64 JSON string for transmission."""
     arr = emb.detach().cpu().numpy().astype(np.float32)
     return json.dumps({
         "type": "emb",
@@ -92,13 +140,14 @@ def _embedding_to_msg(emb: torch.Tensor, confidence: float) -> str:
 
 
 def _on_peer_message(text: str) -> None:
+    """Dispatch an incoming Bluetooth message to the appropriate handler."""
     try:
         obj = json.loads(text)
         msg_type = obj.get("type")
 
         if msg_type == "req_emb":
             print("Received req_emb message")
-            # Peer sent us already-resized image bytes — compute embedding and send it back.
+            # Peer sent us a resized image — compute our embedding and reply
             img_bytes = base64.b64decode(obj["data"])
             image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
             with torch.no_grad():
@@ -110,6 +159,7 @@ def _on_peer_message(text: str) -> None:
 
         elif msg_type == "emb":
             print("Received emb message")
+            # Decode the peer's embedding and put it in the queue for fusion
             arr = np.frombuffer(base64.b64decode(obj["data"]), dtype=np.float32).copy()
             emb = torch.from_numpy(arr.reshape(obj["shape"])).to(DEVICE)
             conf = float(obj.get("confidence", 0.0))
@@ -122,6 +172,7 @@ def _on_peer_message(text: str) -> None:
     except Exception:
         pass
 
+
 peer_node = PeerNode(
     my_name=socket.gethostname(),
     peer_macs=load_peer_macs("peers.json"),
@@ -130,7 +181,9 @@ peer_node = PeerNode(
 )
 peer_node.start()
 
+
 def get_peer_status():
+    """Return connection state and message counters for the UI status bar."""
     return {
         "connected": peer_node.is_connected,
         "active_peer_mac": peer_node.active_peer_mac,
@@ -140,22 +193,33 @@ def get_peer_status():
         "messages_exchanged": peer_node.messages_exchanged,
     }
 
-# ---------------------------------------------------------------------------
+
+# =============================================================================
+# Image Preprocessing Helpers
+# =============================================================================
 
 def bytes_to_resized_image(image_bytes: bytes) -> Image:
+    """Decode raw bytes to a PIL RGB image resized to IMG_SIZE x IMG_SIZE."""
     return Image.open(io.BytesIO(image_bytes)).convert("RGB").resize(
         (IMG_SIZE, IMG_SIZE), Image.BILINEAR)
 
 
 def transform_image(image: Image) -> torch.Tensor:
+    """Apply the node's distortion + augmentation pipeline; add batch dim."""
     return transform(np.array(image)).unsqueeze(0)
 
 
 def image_to_embedding(image: torch.Tensor):
+    """Run the CNN encoder and return the embedding vector (no classifier)."""
     return model.encoder(image)
 
 
+# =============================================================================
+# Inference Functions
+# =============================================================================
+
 def solo_inference(image_bytes: bytes) -> int:
+    """Classify using only this node's CNN — no peer communication."""
     image = bytes_to_resized_image(image_bytes)
     image_tensor = transform_image(image).to(DEVICE)
     with torch.no_grad():
@@ -167,6 +231,13 @@ def solo_inference(image_bytes: bytes) -> int:
 
 
 def fusion_inference(image_bytes: bytes, merge_operator: str | None = None, timeout: float = 5.0) -> int:
+    """Always fuse with the peer — request its embedding and combine.
+
+    Falls back to solo if the peer does not respond within timeout seconds.
+    merge_operator selects how embeddings are combined:
+        None / "fusion_head" — learned cross-attention (model.fused_forward)
+        otherwise            — a statistical operator (confidence weighted, etc.)
+    """
     image = bytes_to_resized_image(image_bytes)
     with torch.no_grad():
         image_tensor = transform_image(image)
@@ -174,7 +245,7 @@ def fusion_inference(image_bytes: bytes, merge_operator: str | None = None, time
         logits, _ = model(image_tensor)
         confidence = confidence_entropy(logits)
 
-    # Send resized image bytes to peer so they can compute the embedding with their pipeline.
+    # Send resized image bytes to peer so they can compute embedding with their pipeline
     resized_buf = io.BytesIO()
     image.save(resized_buf, format="PNG")
     peer_node.send(json.dumps({
@@ -210,6 +281,11 @@ def fusion_inference(image_bytes: bytes, merge_operator: str | None = None, time
 
 
 def confidence_entropy(logits: torch.Tensor) -> float:
+    """Compute normalised confidence as 1 - (entropy / max_entropy).
+
+    Returns a value in [0, 1]; higher means more confident.
+    Uses normalised entropy so the score is comparable across class counts.
+    """
     probs = torch.softmax(logits, dim=-1)
     log_probs = torch.log(probs + 1e-8)
     entropy = -(probs * log_probs).sum(dim=-1)
@@ -218,6 +294,13 @@ def confidence_entropy(logits: torch.Tensor) -> float:
 
 
 def collaborative_inference(image_bytes: bytes, merge_operator: str | None = None, timeout: float = 5.0) -> dict:
+    """Use solo inference if confident; escalate to fusion if not.
+
+    Decision boundary: confidence_entropy(logits) >= CONFIDENCE_THRESHOLD
+    Falls back to solo (with reason tag) if the peer does not respond in time.
+    extra_info["solo_pred_class"] is included so the evaluator can track
+    cases where fusion fixed or broke the solo prediction.
+    """
     image = bytes_to_resized_image(image_bytes)
     with torch.no_grad():
         image_tensor = transform_image(image).to(DEVICE)
@@ -225,15 +308,16 @@ def collaborative_inference(image_bytes: bytes, merge_operator: str | None = Non
 
     confidence = confidence_entropy(logits)
 
+    # High confidence — skip peer communication entirely
     if confidence >= CONFIDENCE_THRESHOLD:
         return {
             "pred_class": logits.argmax(1).item(),
-            "method": "solo_inference", 
+            "method": "solo_inference",
             "reason": "high_confidence",
             "confidence": confidence,
         }
 
-    # Low confidence — request peer embedding and fuse.
+    # Low confidence — request peer embedding and fuse
     own_emb = image_to_embedding(image_tensor)
 
     resized_buf = io.BytesIO()

@@ -1,3 +1,28 @@
+"""
+Evaluation Script — End-to-End GTSRB Inference Benchmark
+=========================================================
+
+Runs three inference modes against a live node server and reports accuracy
+and latency side-by-side for every test image:
+
+    Solo          : only the local node's CNN classifier is used
+    Fusion        : always combine peer embeddings via the fusion head
+    Collaborative : use solo unless confidence is low, then trigger fusion
+
+For Collaborative mode, the script also tracks:
+    - Fusion trigger rate  : how often low confidence caused a peer call
+    - Fixed count          : solo was wrong, fusion corrected it
+    - Broke count          : solo was right, fusion made it wrong
+
+Pipeline (run once on a fresh machine):
+    1. download_gtsrb_dataset()  — download via torchvision, reorganise folders
+    2. prepare_gtsrb_dataset()   — split into Train/Test CSVs (80/20)
+    3. main()                    — iterate Test.csv, call /classify, print stats
+
+Usage:
+    BASE_URL=http://<node-ip>:8000 python evaluation_script.py
+"""
+
 from pathlib import Path
 import shutil
 import time
@@ -8,18 +33,23 @@ import random
 import csv
 import pandas as pd
 
-BASE_URL = os.environ.get("BASE_URL", "http://192.168.0.102:8000") 
+BASE_URL = os.environ.get("BASE_URL", "http://192.168.0.102:8000")
 TEST_CSV = "./GTSRB_data/Test.csv"
 
 
+# =============================================================================
+# Dataset Download
+# Downloads GTSRB via torchvision into a temp folder, then moves the image
+# tree to a clean 'GTSRB_torchvision/' directory and removes the temp files.
+# =============================================================================
+
 def download_gtsrb_dataset():
     print("Step 1: Downloading GTSRB dataset...")
-    # This downloads the raw data into a temporary 'temp_gtsrb' folder
+    # torchvision downloads raw archives into temp_gtsrb/
     train_data = torchvision.datasets.GTSRB(root='temp_gtsrb', split='train', download=True)
     test_data = torchvision.datasets.GTSRB(root='temp_gtsrb', split='test', download=True)
 
-    # The actual images are nested deep inside 'temp_gtsrb/gtsrb/GTSRB/Training'
-    # We want to move them to a clean 'GTSRB_torchvision' folder
+    # Images land deep inside the torchvision cache hierarchy; pull them out
     source_dir = os.path.join('temp_gtsrb', 'gtsrb', 'GTSRB', 'Training')
     target_dir = 'GTSRB_torchvision'
 
@@ -28,13 +58,19 @@ def download_gtsrb_dataset():
         if os.path.exists(target_dir):
             shutil.rmtree(target_dir)
         shutil.move(source_dir, target_dir)
-        
-        # Cleanup temporary files
         shutil.rmtree('temp_gtsrb')
         print("Success! Data is ready in GTSRB_torchvision/.")
     else:
         print("Error: Could not find the downloaded source folder.")
 
+
+# =============================================================================
+# Dataset Preparation
+# Scans GTSRB_torchvision/ (one sub-folder per class, named "00000"–"00042"),
+# applies an 80/20 random train/test split per class, and writes two CSVs:
+#   GTSRB_data/Train.csv  — used by node_learning_gtsrb.py for training
+#   GTSRB_data/Test.csv   — used by main() below for evaluation
+# =============================================================================
 
 def prepare_gtsrb_dataset():
     IMAGES_DIR = "GTSRB_torchvision"
@@ -60,11 +96,12 @@ def prepare_gtsrb_dataset():
         try:
             class_id = int(folder)
         except ValueError:
-            continue
+            continue  # skip non-numeric entries (e.g. .DS_Store)
 
         files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(".ppm")])
         random.shuffle(files)
 
+        # Ensure at least one training sample even for tiny classes
         n_train = max(1, int(len(files) * TRAIN_SPLIT))
         train_files = files[:n_train]
         test_files = files[n_train:]
@@ -79,7 +116,7 @@ def prepare_gtsrb_dataset():
 
         total_images += len(files)
 
-    # Write CSVs
+    # Write Train.csv and Test.csv
     train_csv = os.path.join(OUTPUT_DIR, "Train.csv")
     test_csv  = os.path.join(OUTPUT_DIR, "Test.csv")
 
@@ -102,7 +139,19 @@ def prepare_gtsrb_dataset():
     print("\nDone. You can now run: python node_learning_gtsrb.py")
 
 
+# =============================================================================
+# Inference Helper
+# POSTs a single .ppm file to the node's /classify endpoint.
+# Always uses fusion_head as the merge operator.
+# =============================================================================
+
 def classify_image(image_path: Path, method: str = "collaborative") -> dict:
+    """Send one image to the running node server and return the JSON response.
+
+    Args:
+        image_path : path to a .ppm file from Test.csv
+        method     : "solo" | "fusion" | "collaborative"
+    """
     with open(image_path, "rb") as f:
         response = requests.post(
             f"{BASE_URL}/classify",
@@ -113,6 +162,17 @@ def classify_image(image_path: Path, method: str = "collaborative") -> dict:
     response.raise_for_status()
     return response.json()
 
+
+# =============================================================================
+# Main Evaluation Loop
+# Iterates every row in Test.csv, runs all three inference modes, accumulates
+# accuracy and latency counters, and prints a running summary after each image.
+#
+# Collaborative-specific counters:
+#   trigger_count — fusion was invoked (solo confidence was below threshold)
+#   fixed_count   — solo was wrong AND fusion corrected it
+#   broke_count   — solo was right BUT fusion introduced a mistake
+# =============================================================================
 
 def main():
 
@@ -131,6 +191,7 @@ def main():
         image_path = Path(row["Path"])
         label = row["ClassId"]
 
+        # Time each inference mode independently
         t0 = time.perf_counter(); solo_output = classify_image(image_path, "solo"); solo_total_time += time.perf_counter() - t0
         t0 = time.perf_counter(); fusion_output = classify_image(image_path, "fusion"); fusion_total_time += time.perf_counter() - t0
         t0 = time.perf_counter(); collaborative_output = classify_image(image_path, "collaborative"); collaborative_total_time += time.perf_counter() - t0
@@ -142,13 +203,16 @@ def main():
             fusion_correct_count += 1
         if collaborative_output['pred_class'] == label:
             collaborative_correct_count += 1
+
+        # Analyse when collaborative mode escalated to fusion
         if collaborative_output['method'] == 'fusion_inference':
             collaborative_fusion_trigger_count += 1
 
-            if collaborative_output['extra_info']['solo_pred_class'] != label and collaborative_output['pred_class'] == label:
-                collaborative_fusion_fixed_count += 1
-            if collaborative_output['extra_info']['solo_pred_class'] == label and collaborative_output['pred_class'] != label:
-                collaborative_fusion_broke_count += 1
+            solo_pred = collaborative_output['extra_info']['solo_pred_class']
+            if solo_pred != label and collaborative_output['pred_class'] == label:
+                collaborative_fusion_fixed_count += 1   # fusion rescued a wrong solo
+            if solo_pred == label and collaborative_output['pred_class'] != label:
+                collaborative_fusion_broke_count += 1   # fusion overrode a correct solo
 
         print(
             f"[{test_count}] "

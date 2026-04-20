@@ -1,3 +1,18 @@
+<!--
+  GTSRB Classifier — Single-page UI
+  ==================================
+  Flask-rendered page served by each camera node.
+  Lets the user upload a .ppm traffic-sign image and run inference via one of
+  three modes:
+    - Solo          : only this node's CNN classifier is used
+    - Fusion        : always combine all peer embeddings via the fusion head
+    - Collaborative : use this node alone unless confidence is low, then
+                      request peer embeddings and run the fusion head
+
+  The chosen merge operator (how peer logits/embeddings are combined) is
+  selected from the pill dropdown in the top-right corner.
+  Bluetooth peer connectivity is shown in the status bar and polled every 2 s.
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5,6 +20,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>GTSRB Classifier</title>
   <style>
+
+    /* =========================================================
+       Reset & Base Layout
+       Full-viewport flex centering; card is max 480px wide.
+       ========================================================= */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
@@ -38,7 +58,12 @@
       margin-bottom: 1rem;
     }
 
-    /* Node info row: name (left) + operator badge (right) */
+    /* =========================================================
+       Node Info Row
+       Displays the current node's name (injected by Flask via
+       {{ node_name }}) on the left, and the merge-operator
+       dropdown pill on the right.
+       ========================================================= */
     .node-info {
       display: flex;
       align-items: center;
@@ -56,7 +81,12 @@
     .node-name .node-label { color: #999; font-weight: 500; }
     .node-name .node-value { color: #111; font-weight: 700; }
 
-    /* Drop zone */
+    /* =========================================================
+       Drop Zone
+       Accepts .ppm files via click or drag-and-drop.
+       The file <input> is invisible and covers the whole zone
+       so clicking anywhere triggers the native file picker.
+       ========================================================= */
     .drop-zone {
       border: 2px dashed #c0c7d0;
       border-radius: 12px;
@@ -97,7 +127,12 @@
       margin-top: 0.25rem;
     }
 
-    /* File info card (shown instead of image preview for non-web formats like PPM) */
+    /* =========================================================
+       File Info Card
+       Shown after a file is chosen (instead of an image preview,
+       since .ppm cannot be rendered natively in browsers).
+       Displays the filename and human-readable file size.
+       ========================================================= */
     #preview-wrap {
       display: none;
       margin-top: 1.25rem;
@@ -132,7 +167,11 @@
       margin-top: 0.1rem;
     }
 
-    /* Button */
+    /* =========================================================
+       Classify Button
+       Disabled until a valid file is selected; shows a spinner
+       while the POST request to /classify is in-flight.
+       ========================================================= */
     button {
       display: block;
       width: 100%;
@@ -151,7 +190,12 @@
     button:hover:not(:disabled) { background: #3a57e8; }
     button:disabled { background: #a5b4fc; cursor: not-allowed; }
 
-    /* Result */
+    /* =========================================================
+       Result Panel
+       Hidden by default; revealed after a successful /classify
+       response. Shows: predicted class, method used, confidence
+       percentage, inference time (ms), and reasoning text.
+       ========================================================= */
     #result {
       display: none;
       margin-top: 1.5rem;
@@ -230,8 +274,10 @@
       color: #2d3a8c;
     }
 
-
-    /* Error */
+    /* =========================================================
+       Error Banner
+       Shown on server-returned errors or failed fetch calls.
+       ========================================================= */
     #error {
       display: none;
       margin-top: 1rem;
@@ -243,7 +289,12 @@
       font-size: 0.88rem;
     }
 
-    /* Method selector */
+    /* =========================================================
+       Inference Method Selector
+       Segmented control for Collaborative / Fusion / Solo.
+       Radio inputs are hidden; labels act as clickable segments.
+       The checked radio's adjacent label gets a blue fill.
+       ========================================================= */
     .method-selector {
       display: flex;
       gap: 0;
@@ -277,7 +328,10 @@
       font-weight: 600;
     }
 
-    /* Spinner */
+    /* =========================================================
+       Loading Spinner
+       Injected inside the button's innerHTML while classifying.
+       ========================================================= */
     .spinner {
       display: inline-block;
       width: 18px;
@@ -292,7 +346,13 @@
 
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* Peer status bar */
+    /* =========================================================
+       Peer Status Bar
+       Shows Bluetooth connectivity to the sibling node.
+       Green = connected (collaborative/fusion available).
+       Red   = disconnected (solo inference only).
+       Polled every 2 s via /peer-status.
+       ========================================================= */
     .peer-status {
       display: flex;
       align-items: center;
@@ -334,7 +394,15 @@
       opacity: 0.75;
     }
 
-    /* Merge operator pill (clickable, opens dropdown) */
+    /* =========================================================
+       Merge Operator Dropdown
+       Pill button that opens a dropdown to pick which strategy
+       is used when combining peer outputs:
+         - fusion_head              : learned cross-attention head
+         - confidence_weighted_mean : weight each peer by its softmax confidence
+         - robust_median            : median over per-class logits
+         - top_k_confident          : keep only the K most confident peers (default K = 2)
+       ========================================================= */
     .op-trigger {
       position: relative;
       display: inline-flex;
@@ -408,6 +476,9 @@
     <h1>GTSRB Classifier</h1>
     <p class="subtitle">Upload an image to get a predicted class.</p>
 
+    <!-- Node Info Row
+         Left : node name injected by Flask ({{ node_name }})
+         Right: merge operator pill dropdown -->
     <div class="node-info">
       <div class="node-name">
         <span class="node-label">Node</span>
@@ -427,12 +498,16 @@
       </div>
     </div>
 
+    <!-- Peer Status Bar
+         Reflects Bluetooth connection to the sibling node.
+         JS updates this every 2 s by polling /peer-status. -->
     <div class="peer-status disconnected" id="peer-status">
       <span class="dot"></span>
       <span id="peer-status-text">Bluetooth: connecting…</span>
       <span class="counter" id="peer-counter" style="display:none">0 messages exchanged</span>
     </div>
 
+    <!-- File Drop Zone — only .ppm files are accepted -->
     <div class="drop-zone" id="drop-zone">
       <input type="file" id="file-input" accept=".ppm" />
       <div class="icon">🖼️</div>
@@ -440,6 +515,9 @@
       <p class="hint">or click to browse</p>
     </div>
 
+    <!-- File Info Card
+         Replaces the drop zone prompt once a file is chosen;
+         shows filename and size (browsers can't render .ppm). -->
     <div id="preview-wrap">
       <div id="file-info">
         <div class="file-icon">🗂️</div>
@@ -450,6 +528,9 @@
       </div>
     </div>
 
+    <!-- Inference Method Selector
+         Sends ?method=<value> to /classify.
+         Collaborative and Fusion require a connected peer. -->
     <div class="method-selector">
       <input type="radio" name="method" id="m-collaborative" value="collaborative" checked />
       <label for="m-collaborative">Collaborative</label>
@@ -461,6 +542,10 @@
 
     <button id="classify-btn" disabled>Classify</button>
 
+    <!-- Result Panel
+         Hidden until /classify responds successfully.
+         confidence-row, timing-row, reason-row are conditionally
+         shown depending on which fields the server returns. -->
     <div id="result">
       <div class="label">Predicted Class</div>
       <div class="class-value" id="class-output">—</div>
@@ -473,10 +558,14 @@
       </div>
     </div>
 
+    <!-- Error Banner — populated by JS on request failure -->
     <div id="error"></div>
   </div>
 
   <script>
+    // =========================================================
+    // DOM References
+    // =========================================================
     const fileInput = document.getElementById('file-input');
     const dropZone = document.getElementById('drop-zone');
     const previewWrap = document.getElementById('preview-wrap');
@@ -499,17 +588,24 @@
 
     let selectedFile = null;
 
+    // =========================================================
+    // File Utilities
+    // =========================================================
+
+    // Convert raw byte count to a human-readable string (B / KB / MB)
     function formatBytes(bytes) {
       if (bytes < 1024) return bytes + ' B';
       if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
       return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
+    // Extract lowercase file extension from a filename
     function getExt(name) {
       const m = name.match(/(\.[^.]+)$/);
       return m ? m[1].toLowerCase() : '';
     }
 
+    // Display the chosen file's name/size and enable the Classify button
     function showFile(file) {
       selectedFile = file;
       previewWrap.style.display = 'block';
@@ -526,6 +622,10 @@
     function isAllowed(file) {
       return ALLOWED_EXTENSIONS.has(getExt(file.name));
     }
+
+    // =========================================================
+    // File Input & Drag-and-Drop Handlers
+    // =========================================================
 
     fileInput.addEventListener('change', () => {
       if (fileInput.files[0]) showFile(fileInput.files[0]);
@@ -545,6 +645,22 @@
       if (file && isAllowed(file)) showFile(file);
     });
 
+    // =========================================================
+    // Classify — POST to /classify and render the result
+    //
+    // Query params sent:
+    //   method         : collaborative | fusion | solo
+    //   merge_operator : fusion_head | confidence_weighted_mean |
+    //                    robust_median | top_k_confident
+    //
+    // Expected JSON response fields:
+    //   pred_class   (required) : predicted GTSRB class ID
+    //   method       (required) : echo of the method used
+    //   confidence   (optional) : float 0–1, shown as %
+    //   inference_ms (optional) : end-to-end latency in ms
+    //   reason       (optional) : text explanation (fusion/collab)
+    //   error        (optional) : error string if inference failed
+    // =========================================================
     classifyBtn.addEventListener('click', async () => {
       if (!selectedFile) return;
 
@@ -603,7 +719,13 @@
         classifyBtn.textContent = 'Classify';
       }
     });
-    // --- Merge operator dropdown ---
+
+    // =========================================================
+    // Merge Operator Dropdown
+    // Maps each operator value to its display icon and label.
+    // selectMergeOp() updates the pill badge and highlights the
+    // active option; clicking outside closes the dropdown.
+    // =========================================================
     const OP_META = {
       "fusion_head":              { icon: "🧠", name: "Per-Node Fusion" },
       "confidence_weighted_mean": { icon: "⚖️", name: "Conf. Weighted Mean" },
@@ -644,7 +766,12 @@
 
     selectMergeOp("fusion_head");
 
-    // --- Peer status polling ---
+    // =========================================================
+    // Peer Status Polling
+    // Calls /peer-status every 2 s and updates the banner.
+    // When connected, shows peer MAC and message counters.
+    // When disconnected, only solo inference is available.
+    // =========================================================
     const peerStatusEl  = document.getElementById('peer-status');
     const peerStatusText = document.getElementById('peer-status-text');
     const peerCounter   = document.getElementById('peer-counter');
